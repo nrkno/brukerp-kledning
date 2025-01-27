@@ -1,0 +1,9 @@
+#+TITLE: Bekledning av brukere fra hva vi vet
+#+DATE: 27.01.1986
+#+AUTHOR: Emil
+#+EXPORT_FILE_NAME: readme.org
+* Kort oppsummert
+* Innledning
+NRK TV ønsker seg mer informasjon om brukerne våre basert på det vi vet. Dette har sitt utspring i at førsteparts data som vi får gjennom sporing med Snowplow ikke gir oss data på om det er flere som ser et innhold, slik TVOV-undersøkelsen gjør. Kan vi klare å inferere hvilket innhold som konsumeres av flere samtidig på samme skjerm? Det skal vi prøve å undersøke i dette dokumentet.
+* Fremgangsmåte
+Vi begrenser oss til å se på konsum på storskjerm fra påloggede brukere. Videre bruker vi innhold med en stor samseingsverdi som Maskorama, ESC og Kakemesterskapet til å filtrere ut brukere som muligens ser sammen med flere i familien. Deretter undersøker vi om disse brukerne har barneprofiler tilknyttet seg, og om klienten har blitt logget på av andre voksenbrukere. Deretter sjekker vi hvilket annet innhold som konsumeres av denne profilen, og om de andre profilene konsumerer noe innhold. Denne innsikten blir grunnlaget for å identifisere annet innhold som fungerer for samseing.
