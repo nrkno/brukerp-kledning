@@ -1,9 +1,1325 @@
 #+TITLE: Bekledning av brukere fra hva vi vet
 #+DATE: 27.01.1986
 #+AUTHOR: Emil
+#+STARTUP: hideblocks
+#+STARTUP: fold
 #+EXPORT_FILE_NAME: readme.org
-* Kort oppsummert
+#+PROPERTY: header-args:bigquery :eval never-export :exports both
+#+PROPERTY: header-args:python :session *Python* :results silent :eval never-export :exports both
+
+
 * Innledning
 NRK TV ønsker seg mer informasjon om brukerne våre basert på det vi vet. Dette har sitt utspring i at førsteparts data som vi får gjennom sporing med Snowplow ikke gir oss data på om det er flere som ser et innhold, slik TVOV-undersøkelsen gjør. Kan vi klare å inferere hvilket innhold som konsumeres av flere samtidig på samme skjerm? Det skal vi prøve å undersøke i dette dokumentet.
+* Kort oppsummert
+Her kommer en oppsummering av funnene.
+1. I løpet av de siste tretti dagene er det ca. 1,35 millioner TV-klienter som som er logget på med kun én bruker. Circa 90 000 av klientene konsumerer kun barneprogrammer. Disse kan helt sikkert regnes som en del av en familie.
+2. I løpet av samme periode er det ca. 256 000 klienter hvor det konsumeres både barne- og voksenprogrammer.
 * Fremgangsmåte
 Vi begrenser oss til å se på konsum på storskjerm fra påloggede brukere. Videre bruker vi innhold med en stor samseingsverdi som Maskorama, ESC og Kakemesterskapet til å filtrere ut brukere som muligens ser sammen med flere i familien. Deretter undersøker vi om disse brukerne har barneprofiler tilknyttet seg, og om klienten har blitt logget på av andre voksenbrukere. Deretter sjekker vi hvilket annet innhold som konsumeres av denne profilen, og om de andre profilene konsumerer noe innhold. Denne innsikten blir grunnlaget for å identifisere annet innhold som fungerer for samseing.
+* Del 1
+Finner tidsperioden for Maskorama
+#+begin_src bigquery
+  #standardSQL
+  SELECT publishedDate, firstTransmissionDate, id, seriesTitleOrTitle
+    FROM `nrk-datahub.metadata_views.metadata_programs`
+   WHERE seriesTitleOrTitle LIKE '%askor%'
+     AND EXTRACT(YEAR FROM publishedDate) = 2024
+#+end_src
+
+#+begin_src bigquery
+  #standardSQL
+  SELECT COUNT(DISTINCT visitorId) `TV-klienter som har spilt av Maskorama` --partitionDate, content.id, nrkUserId, 
+    FROM `nrk-datahub.snowplow_processed.playback_v02`
+         JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+   WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+     AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+     AND platform = 'tv'
+#+end_src
+
+#+RESULTS:
+| TV-klienter som har spilt av Maskorama |
+|-------------------------------------|
+|                              152006 |
+
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    KLIENTER AS (
+    SELECT DISTINCT visitorId
+      FROM `nrk-datahub.snowplow_processed.playback_v02`
+     WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+       AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+       AND platform = 'tv'
+    ),
+
+    BRUKERE AS (
+      SELECT visitorId, COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile != 'user', nrkUserId, NULL)) Barn
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN KLIENTER USING(visitorId)
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'
+       GROUP BY 1)
+
+    SELECT COUNT(visitorId) `TV-klienter med to eller flere påloggede`
+      FROM BRUKERE
+     WHERE Voksne + Barn > 1
+#+end_src
+
+#+RESULTS:
+| TV-klienter med to eller flere påloggede |
+|------------------------------------------|
+|                                    29860 |
+
+Nå ser vi på sammensetningen av barne- og voksenprofiler på klientene som har spilt av Maskorama.
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    KLIENTER AS (
+    SELECT DISTINCT visitorId
+      FROM `nrk-datahub.snowplow_processed.playback_v02`
+     WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+       AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+       AND platform = 'tv'),
+
+    BRUKERE AS (
+      SELECT visitorId,
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile != 'user', nrkUserId, NULL)) Barn,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN KLIENTER USING(visitorId)
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'
+       GROUP BY 1),
+
+    BRUKERGRUPPERING AS (
+      SELECT COUNT(visitorId) klienter,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+        FROM BRUKERE
+       GROUP BY ALL)
+
+    SELECT CASE
+             WHEN voksnei = 0 THEN '0'
+             WHEN voksnei = 1 THEN '1'
+             WHEN voksnei = 2 THEN '2-3'
+             ELSE '> 3'
+           END voksne,
+           CASE
+             WHEN barni = 0 THEN '0'
+             WHEN barni = 1 THEN '1-3'
+             ELSE '> 3'
+           END barn,
+           klienter
+      FROM BRUKERGRUPPERING
+     ORDER BY voksnei, barni
+#+end_src
+
+#+RESULTS:
+| voksne | barn | klienter |
+|--------+------+----------|
+|      0 |  1-3 |      369 |
+|      0 |  > 3 |        1 |
+|      1 |    0 |   126943 |
+|      1 |  1-3 |    26516 |
+|      1 |  > 3 |      195 |
+|    2-3 |    0 |     1839 |
+|    2-3 |  1-3 |     1098 |
+|    2-3 |  > 3 |       74 |
+|    > 3 |    0 |       10 |
+|    > 3 |  1-3 |        1 |
+
+Her ser vi på antall menn, kvinner, voksne, gutter, jenter og barn og fordelingen av TV-klienter.
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    KLIENTER AS (
+    SELECT DISTINCT visitorId
+      FROM `nrk-datahub.snowplow_processed.playback_v02`
+     WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+       AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+       AND platform = 'tv'
+    ),
+
+    BRUKERE AS (
+  SELECT visitorId,
+         COUNT(DISTINCT IF(gender = 'M' AND userOrProfile = 'user', nrkUserId, NULL)) menn,
+         COUNT(DISTINCT IF(gender = 'F' AND userOrProfile = 'user', nrkUserId, NULL)) kvinner,
+         COUNT(DISTINCT IF(gender IS NULL OR gender = 'O' AND userOrProfile = 'user', nrkUserId, NULL)) voksne,
+         COUNT(DISTINCT IF(gender = 'M' AND userOrProfile != 'user', nrkUserId, NULL)) gutter,
+         COUNT(DISTINCT IF(gender = 'F' AND userOrProfile != 'user', nrkUserId, NULL)) jenter,
+         COUNT(DISTINCT IF(gender IS NULL OR gender = 'O' AND userOrProfile != 'user', nrkUserId, NULL)) barn
+    FROM `nrk-datahub.snowplow_processed.views_v02`
+         JOIN KLIENTER USING(visitorId)
+         JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+   WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+     AND platform = 'tv'
+   GROUP BY ALL)
+
+    SELECT menn, kvinner, gutter, jenter, voksne, barn, COUNT(visitorId) Klienter
+      FROM BRUKERE
+     GROUP BY ALL
+   ORDER BY 1, 2, 3, 4, 5, 6
+#+end_src
+
+Nå skal vi se på hvor mye tid som brukes på konsum og hvordan det fordeler seg på de ulike profilene.
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    KLIENTER AS (
+      SELECT DISTINCT visitorId
+        FROM `nrk-datahub.snowplow_processed.playback_v02`
+       WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+         AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+         AND platform = 'tv'),
+
+    BRUKERE AS (
+      SELECT visitorId,
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile != 'user', nrkUserId, NULL)) Barn,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN KLIENTER USING(visitorId)
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'
+       GROUP BY 1),
+
+    INNHOLD AS (
+      SELECT visitorId, seriesTitleOrTitle, --nrkUserId, userOrProfile, 
+             SUM(secondsConsumed) Konsum
+        FROM BRUKERE
+             JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(visitorId)
+             JOIN `nrk-datahub.metadata_views.metadata_programs` ON content.id = id
+             LEFT JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'
+         AND Voksne + Barn > 1
+       GROUP BY ALL),
+
+    TOTALT AS (
+      SELECT visitorId, SUM(Konsum) / 3600 Tot_konsum_timer
+        FROM INNHOLD
+       GROUP BY ALL),
+    
+    RANGERING AS (
+      SELECT visitorId, seriesTitleOrTitle,
+             SAFE_DIVIDE(Konsum / 3600, Tot_konsum_timer) Andel_av_tot,
+             Tot_konsum_timer,
+             ROW_NUMBER() OVER(PARTITION BY visitorId ORDER BY Konsum DESC) plass
+        FROM INNHOLD
+             JOIN TOTALT USING(visitorId)),
+    
+    ANTALL AS (
+      SELECT plass, seriesTitleOrTitle,
+             SUM(Andel_av_tot) snittandel,
+             COUNT(DISTINCT visitorId) `TV-klienter`
+        FROM RANGERING
+       GROUP BY ALL)
+
+    SELECT plass, seriesTitleOrTitle,
+           SAFE_DIVIDE(snittandel, `TV-klienter`) snittandel,
+           `TV-klienter`
+       FROM ANTALL
+      ORDER BY 1, 4 DESC
+#+end_src
+* Del 2
+Hensikten med denne øvelsen er å finne ut om vi kan si noe om hvor vidt flere publikummere ser på samme TV-skjerm samtidig (samtitting). Vi har ikke data på dette, så vi må gjøre en del gjetninger på indirekte mål vi kan bruke som kanskje korrelerer med samtititting. Her er en liste:
+- Samtitting foregår i større grad på TV-klienter som logges på med flere profiler.
+- Samtitting foregår i større grad på visse typer programmer.
+- Samtitting med barn skjer tidligere på kvelden, mens samtitting med kun voksne skjer senere på kvelden.
+
+
+Siden vi ikke kan korrelere disse gjetningene med data på samtitting, må vi forsøke å finne ut om det er forskjeller på krysstabulerte grupper. For eksempel kan vi undersøke om det forskjell mellom klienter med én pålogget profil og flere påloggede profiler i typen programmer som blir sett, eller når på kvelden programmene blir sett.
+
+Det enkleste er å starte med å se på besøksstatistikk for brukerne som har vært logget på klientene fordelt på antall brukere som har vært pålogget klienten.
+
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    KLIENTER AS (
+    SELECT DISTINCT visitorId
+      FROM `nrk-datahub.snowplow_processed.playback_v02`
+     WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+       AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+       AND platform = 'tv'
+    ),
+
+    BRUKERE AS (
+      SELECT DISTINCT visitorId, nrkUserId, userOrProfile,
+             daysVisited, rfv.secondsConsumed
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN KLIENTER USING(visitorId)
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+             -- Her mister vi nok noen klienter hvor brukerne ikke har vært logget på etter 15. nov 2024(?)
+             JOIN (SELECT nrkUserId, last28Days.daysVisited,
+                          last28Days.secondsConsumed
+                     FROM `nrk-datahub.snowplow_aggregate.total_rfv`
+                    WHERE partitionDate = '2024-12-13') rfv USING(nrkUserId)
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'),
+
+    KLIENTAGG AS (
+      SELECT visitorId,
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile != 'user', nrkUserId, NULL)) Barn,
+             SUM(daysVisited) dager_besok, -- husk at dette er dager med besøk i NRK, ikke bare på klienten
+             SUM(secondsConsumed) konsum_sek -- samme som over
+        FROM BRUKERE
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM KLIENTAGG
+       GROUP BY ALL),
+
+    AGG AS (
+    SELECT voksnes, barns, voksnei, barni,
+           SUM(dager_besok) / SUM(voksne + barn) snitt_besok,
+           SUM(konsum_sek) / SUM(voksne + barn) / 3600 snitt_konsum,
+           COUNT(visitorId) klienter
+      FROM BRUKERGRUPPERING
+     GROUP BY ALL)
+
+    SELECT voksnes voksne, barns barn,
+           snitt_besok `Besøksdager per profil`,
+           snitt_konsum `Timer konsum per profil`,
+           klienter
+      FROM AGG
+     ORDER BY voksnei, barni
+#+end_src
+
+#+RESULTS:
+| voksne | barn |        snitt_besok |       snitt_konsum | klienter |
+|--------+------+--------------------+--------------------+----------|
+|      0 |  1-3 | 12.173410404624278 | 15.702509633911369 |      369 |
+|      0 |  > 3 |              11.25 | 11.174097222222223 |        1 |
+|      1 |    0 | 19.660225455519406 |  35.37026535531695 |   126943 |
+|      1 |  1-3 | 15.193001387390165 | 17.495435426408374 |    26516 |
+|      1 |  > 3 | 12.271018793273987 | 11.982737113968568 |      195 |
+|    2-3 |    0 |  17.21095817893065 |  23.63672181048174 |     1839 |
+|    2-3 |  1-3 | 14.833459119496855 | 15.367232285115305 |     1098 |
+|    2-3 |  > 3 | 11.918803418803419 | 10.623557692307694 |       74 |
+|    > 3 |    0 |              16.15 | 20.599104166666667 |       10 |
+|    > 3 |  1-3 |               15.2 | 11.574111111111112 |        1 |
+
+Vi ser at det er et skille mellom både antall besøksdager og timer med konsum per profil i løpet av en fireukersperiode mellom profiler som har logget på klienter hvor det har vært logget på kun voksne og der det også har vært logget på barn. Husk at besøksdagene og konsumet gjelder alle NRKs tjenester for disse profilene. Vi kan derfor anta at barneprofilene trekker antallet besøksdager ned, siden de naturlig er på færre tjenester enn voksne. La oss derfor sammenligne disse metrikkene kun for de voksne.
+
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    KLIENTER AS (
+    SELECT DISTINCT visitorId
+      FROM `nrk-datahub.snowplow_processed.playback_v02`
+     WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+       AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+       AND platform = 'tv'
+    ),
+
+    BRUKERE AS (
+      SELECT DISTINCT visitorId, nrkUserId, userOrProfile,
+             daysVisited, rfv.secondsConsumed
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN KLIENTER USING(visitorId)
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+             -- Her mister vi nok noen klienter hvor brukerne ikke har vært logget på etter 15. nov 2024(?)
+             JOIN (SELECT nrkUserId, last28Days.daysVisited,
+                          last28Days.secondsConsumed
+                     FROM `nrk-datahub.snowplow_aggregate.total_rfv`
+                    WHERE partitionDate = '2024-12-13') rfv USING(nrkUserId)
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'),
+
+    KLIENTAGG AS (
+      SELECT visitorId,
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile != 'user', nrkUserId, NULL)) Barn,
+             SUM(IF(userOrProfile = 'user', daysVisited, NULL)) dager_besok_voksen, -- husk at dette er dager med besøk i NRK, ikke bare på klienten
+             SUM(IF(userOrProfile = 'user', secondsConsumed, NULL)) konsum_sek_voksen -- samme som over
+        FROM BRUKERE
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM KLIENTAGG
+       GROUP BY ALL),
+
+    AGG AS (
+      SELECT voksnes, barns, voksnei, barni,
+             SUM(dager_besok_voksen) / SUM(voksne) snitt_besok_voksen,
+             SUM(konsum_sek_voksen) / SUM(voksne) / 3600 snitt_konsum_voksen,
+             COUNT(visitorId) klienter
+        FROM BRUKERGRUPPERING
+       WHERE voksne > 0
+       GROUP BY ALL)
+
+    SELECT voksnes voksne, barns barn,
+           snitt_besok_voksen `Besøksdager per profil`,
+           snitt_konsum_voksen `Timer konsum per profil`,
+           klienter
+      FROM AGG
+     ORDER BY voksnei, barni
+#+end_src
+
+#+RESULTS:
+| voksne | barn | Besøksdager per profil | Timer konsum per profil | klienter |
+|--------+------+------------------------+-------------------------+----------|
+|      1 |    0 |     19.660225455519406 |       35.37026535531695 |   126943 |
+|      1 |  1-3 |     20.416955800271534 |      24.997393209131594 |    26516 |
+|      1 |  > 3 |     20.743589743589745 |      20.367146723646727 |      195 |
+|    2-3 |    0 |      17.21095817893065 |       23.63672181048174 |     1839 |
+|    2-3 |  1-3 |       18.0653828929691 |      18.722201696770664 |     1098 |
+|    2-3 |  > 3 |      17.85234899328859 |      15.019338180462341 |       74 |
+|    > 3 |    0 |                  16.15 |      20.599104166666667 |       10 |
+|    > 3 |  1-3 |                  15.75 |       13.10951388888889 |        1 |
+
+Vi ser altså at antall besøksdager holder seg høyt når vi kun ser på voksenprofiler, men at timer med konsum er lavere der det også er barneprofiler med.
+
+Det kan være interessant å gjøre denne øvelsen spesifikt for besøk hos NRK TV.
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    KLIENTER AS (
+    SELECT DISTINCT visitorId
+      FROM `nrk-datahub.snowplow_processed.playback_v02`
+     WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+       AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+       AND platform = 'tv'
+    ),
+
+    BRUKERE AS (
+      SELECT DISTINCT visitorId, nrkUserId, userOrProfile,
+             daysVisited, rfv.secondsConsumed
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN KLIENTER USING(visitorId)
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+             -- Her mister vi nok noen klienter hvor brukerne ikke har vært logget på etter 15. nov 2024(?)
+             JOIN (SELECT nrkUserId, last28Days.daysVisited,
+                          last28Days.secondsConsumed
+                     FROM `nrk-datahub.snowplow_aggregate.rfv_v01`
+                    WHERE partitionDate = '2024-12-13'
+                      AND nrkService = 'nrktv') rfv USING(nrkUserId)
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'),
+
+    KLIENTAGG AS (
+      SELECT visitorId,
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile != 'user', nrkUserId, NULL)) Barn,
+             SUM(IF(userOrProfile = 'user', daysVisited, NULL)) dager_besok_voksen, -- husk at dette er dager med besøk i NRK, ikke bare på klienten
+             SUM(IF(userOrProfile = 'user', secondsConsumed, NULL)) konsum_sek_voksen, -- samme som over
+             SUM(IF(userOrProfile != 'user', daysVisited, NULL)) dager_besok_barn, -- husk at dette er dager med besøk i NRK, ikke bare på klienten
+             SUM(IF(userOrProfile != 'user', secondsConsumed, NULL)) konsum_sek_barn -- samme som over
+        FROM BRUKERE
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM KLIENTAGG
+       GROUP BY ALL),
+
+    SA AS (
+      SELECT voksnes, barns,
+             STDDEV(IF(userOrProfile = 'user', daysVisited, NULL)) sa_besok_voks,
+             STDDEV(IF(userOrProfile != 'user', daysVisited, NULL)) sa_besok_barn,
+             STDDEV(IF(userOrProfile = 'user', secondsConsumed / 3600, NULL)) sa_konsum_voks,
+             STDDEV(IF(userOrProfile != 'user', secondsConsumed / 3600, NULL)) sa_konsum_barn,
+             STDDEV(secondsConsumed / 3600) sa_konsum,
+             STDDEV(daysVisited) sa_besok
+        FROM BRUKERGRUPPERING
+             JOIN BRUKERE USING(visitorId)
+       GROUP BY ALL
+      ),
+
+    AGG AS (
+      SELECT voksnes, barns, voksnei, barni,
+             SUM(dager_besok_voksen) / SUM(voksne) snitt_besok_voksen,
+             SUM(konsum_sek_voksen) / SUM(voksne) / 3600 snitt_konsum_voksen,
+             SUM(dager_besok_barn) / SUM(barn) snitt_besok_barn,
+             SUM(konsum_sek_barn) / SUM(barn) / 3600 snitt_konsum_barn,
+             SUM(dager_besok_barn + dager_besok_voksen) / SUM(barn + voksne) snitt_besok,
+             SUM(konsum_sek_barn + dager_besok_voksen) / SUM(barn + voksne) / 3600 snitt_konsum,             
+             COUNT(visitorId) klienter
+        FROM BRUKERGRUPPERING
+       GROUP BY ALL)
+
+    SELECT voksnes voksne, barns barn,
+           snitt_besok_voksen `Besøksdager per voksen`,
+           snitt_besok_barn `Besøksdager per barn`,
+           snitt_besok `Besøksdager per profil`,
+           snitt_konsum_voksen `Timer konsum per voksen`,
+           snitt_konsum_barn `Timer konsum per barn`,
+           snitt_konsum `Timer konsum per profil`,
+           sa_besok_voks,
+           sa_besok_barn,
+           sa_besok,
+           sa_konsum_voks,
+           sa_konsum_barn,
+           sa_konsum,
+           klienter
+      FROM AGG
+           JOIN SA USING(voksnes, barns)
+     ORDER BY voksnei, barni
+#+end_src
+
+#+RESULTS:
+| voksne | barn | Besøksdager per voksen | Besøksdager per barn | Besøksdager per profil | Timer konsum per voksen | Timer konsum per barn | Timer konsum per profil |      sa_besok_voks |      sa_besok_barn |           sa_besok |     sa_konsum_voks |     sa_konsum_barn |          sa_konsum | klienter |
+|--------+------+------------------------+----------------------+------------------------+-------------------------+-----------------------+-------------------------+--------------------+--------------------+--------------------+--------------------+--------------------+--------------------+----------|
+|      0 |  1-3 |                        |    10.86897880539499 |                        |                         |    13.854682080924855 |                         |                    |  7.864916752033478 |  7.864916752033478 |                    |   18.3749273164922 |   18.3749273164922 |      369 |
+|      0 |  > 3 |                        |                10.75 |                        |                         |    10.569027777777778 |                         |                    | 11.615363389350618 | 11.615363389350618 |                    | 11.939282574339119 | 11.939282574339119 |        1 |
+|      1 |    0 |      16.92876330321483 |                      |                        |      28.504160034206077 |                       |                         | 7.4931469976222855 |                    | 7.4931469976222855 |  38.86020085073713 |                    |  38.86020085073713 |   126943 |
+|      1 |  1-3 |     17.187056871322977 |     9.57441205610888 |     12.541405888700478 |       18.41406223286569 |    10.148720530380722 |       5.992905833033589 |  6.845793061734723 | 7.7508193594760595 |  8.232172421683588 | 17.593769780637793 | 14.696553328688204 | 16.433511587016522 |    26516 |
+|      1 |  > 3 |     17.584615384615386 |    8.723039215686274 |      10.37190900098912 |      14.936118233618233 |     8.670529684095861 |       6.921457577755797 |  7.250707036138176 |  7.243470129283269 |  8.026217645686264 | 13.159747381819093 | 13.521533261671411 | 13.645782883527305 |      195 |
+|    2-3 |    0 |       13.5283218634198 |                      |                        |      16.881611596376683 |                       |                         |  7.627268896827601 |                    |  7.627268896827601 | 21.511707243351967 |                    | 21.511707243351967 |     1839 |
+|    2-3 |  1-3 |     13.346171070309001 |    9.262916188289323 |     11.436729559748427 |      12.235634423048216 |     9.615731120040822 |        4.21592641509434 |  7.391439712097892 |  7.836326701228751 |  7.827867989013927 | 15.178247275735485 | 13.983301075933415 |  14.71912271106943 |     1098 |
+|    2-3 |  > 3 |     12.845637583892618 |    7.222570532915361 |      9.012820512820513 |      10.502390007457121 |     7.062836119818879 |       4.815334164292498 |  7.001437609475996 |  6.188735412976103 |  6.965667246955752 | 10.729515680351732 | 10.904954167135683 |  10.95298621251947 |       74 |
+|    > 3 |    0 |                 12.475 |                      |                        |       17.36609027777778 |                       |                         |   8.79646904992502 |                    |   8.79646904992502 | 23.827789124086802 |                    | 23.827789124086802 |       10 |
+|    > 3 |  1-3 |                   14.5 |                 13.0 |                   14.2 |      13.102986111111111 |                5.4325 |      1.0897222222222223 | 11.090536506409418 |                    |  9.628083921528727 | 14.731985575287652 |                    |  13.21138980876018 |        1 |
+** Konsum
+La oss nå se på hvilke titler som konsumeres på TV-klienter med de ulike profilsammensetningene.
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    KLIENTER AS (
+    SELECT DISTINCT visitorId
+      FROM `nrk-datahub.snowplow_processed.playback_v02`
+     WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+       AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+       AND platform = 'tv'
+    ),
+
+    BRUKERE AS (
+      SELECT DISTINCT visitorId, nrkUserId, userOrProfile,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN KLIENTER USING(visitorId)
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'),
+
+    AVSPILLINGER AS (
+      SELECT nrkuserId, visitorId, seriesTitleOrTitle, SUM(secondsConsumed) konsum_sek
+        FROM BRUKERE
+             LEFT JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(nrkUserId, visitorId)
+             LEFT JOIN `nrk-datahub.metadata_views.metadata_programs` ON id=content.id
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'
+       GROUP BY ALL),
+
+    KLIENTAGG AS (
+      SELECT visitorId,
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile != 'user', nrkUserId, NULL)) Barn,
+             COUNT(seriesTitleOrTitle) titler,
+             SUM(konsum_sek) konsum
+        FROM BRUKERE
+             JOIN AVSPILLINGER USING(nrkUserId, visitorId)
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM KLIENTAGG
+       GROUP BY ALL),
+
+    AGG AS (
+      SELECT voksnes, barns, voksnei, barni,
+             SUM(titler) / SUM(voksne + barn) snitt_titler,
+             SUM(konsum) / SUM(voksne + barn) / 3600 snitt_konsum,
+             COUNT(visitorId) klienter
+        FROM BRUKERGRUPPERING
+       GROUP BY ALL),
+
+    SA AS (
+      SELECT voksnes, barns,
+             -- STDDEV(IF(userOrProfile = 'user', daysVisited, NULL)) sa_besok_voks,
+             -- STDDEV(IF(userOrProfile != 'user', daysVisited, NULL)) sa_besok_barn,
+             -- STDDEV(IF(userOrProfile = 'user', secondsConsumed / 3600, NULL)) sa_konsum_voks,
+             -- STDDEV(IF(userOrProfile != 'user', secondsConsumed / 3600, NULL)) sa_konsum_barn,
+             STDDEV(konsum_sek / 3600) sa_konsum,
+             STDDEV(titler) sa_titler
+        FROM BRUKERGRUPPERING
+             JOIN AVSPILLINGER USING(visitorId)
+       GROUP BY ALL)
+    
+    SELECT voksnes voksne, barns barn,
+           snitt_titler `Titler per profil`,
+           snitt_konsum `Timer konsumert per profil`,
+           sa_titler `Standardavvik i titler`,
+           sa_konsum `Standardavvik i konsum`
+      FROM AGG
+           JOIN SA USING(voksnes, barns)
+     ORDER BY voksnei, barni
+#+end_src
+
+#+RESULTS:
+| voksne | barn |  Titler per profil | Timer konsumert per profil | Standardavvik i titler | Standardavvik i konsum |
+|--------+------+--------------------+----------------------------+------------------------+------------------------|
+|      0 |  1-3 | 10.306632213608959 |         11.783238348167288 |     33.281719068928794 |       3.41146853363906 |
+|      0 |  > 3 |               13.2 |         11.233022222222221 |      44.81372171250847 |     1.6538476973155098 |
+|      1 |    0 | 23.032179758496202 |          27.57929571118096 |      33.56283570725193 |       2.88865756907981 |
+|      1 |  1-3 |  14.32497418989576 |         14.110013224209322 |     32.068189018038005 |      2.141899249311868 |
+|      1 |  > 3 | 11.566707466340269 |         10.481960764313884 |     36.538881469081616 |     2.2709013056628824 |
+|    2-3 |    0 | 14.796130522668207 |         15.204822488529535 |      31.17385087258837 |     2.1257942638623706 |
+|    2-3 |  1-3 | 11.784852142426072 |         10.922545849259036 |     33.967953409131475 |     1.9511222553859124 |
+|    2-3 |  > 3 | 10.235474006116208 |          8.535960754332313 |     42.915555639814535 |       1.62301483892852 |
+|    > 3 |    0 |              12.15 |         10.113638888888888 |      34.16440972073519 |     1.5452092875633243 |
+
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    KLIENTER AS (
+    SELECT DISTINCT visitorId
+      FROM `nrk-datahub.snowplow_processed.playback_v02`
+     WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+       AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+       AND platform = 'tv'
+    ),
+
+    BRUKERE AS (
+      SELECT DISTINCT visitorId, nrkUserId, userOrProfile,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN KLIENTER USING(visitorId)
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'),
+
+    AVSPILLINGER AS (
+      SELECT nrkuserId, visitorId, seriesTitleOrTitle, SUM(secondsConsumed) konsum_sek
+        FROM BRUKERE
+             LEFT JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(nrkUserId, visitorId)
+             LEFT JOIN `nrk-datahub.metadata_views.metadata_programs` ON id=content.id
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'
+       GROUP BY ALL),
+
+    KLIENTAGG AS (
+      SELECT visitorId,
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile != 'user', nrkUserId, NULL)) Barn,
+             COUNT(IF(userOrProfile = 'user', seriesTitleOrTitle, NULL)) titler,
+             SUM(IF(userOrProfile = 'user', konsum_sek, NULL)) konsum
+        FROM BRUKERE
+             JOIN AVSPILLINGER USING(nrkUserId, visitorId)
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM KLIENTAGG
+       GROUP BY ALL),
+
+    AGG AS (
+      SELECT voksnes, barns, voksnei, barni,
+             SUM(titler) / SUM(voksne) snitt_titler,
+             SUM(konsum) / SUM(voksne) / 3600 snitt_konsum,
+             COUNT(visitorId) klienter
+        FROM BRUKERGRUPPERING
+       WHERE voksnei > 0
+       GROUP BY ALL),
+
+    SA AS (
+      SELECT voksnes, barns,
+             STDDEV(IF(userOrProfile = 'user', titler, NULL)) sa_titler,
+             -- STDDEV(IF(userOrProfile != 'user', daysVisited, NULL)) sa_besok_barn,
+             STDDEV(IF(userOrProfile = 'user', konsum_sek / 3600, NULL)) sa_konsum,
+             -- STDDEV(IF(userOrProfile != 'user', secondsConsumed / 3600, NULL)) sa_konsum_barn,
+        FROM BRUKERE
+  	   JOIN BRUKERGRUPPERING USING(visitorId)    	   
+             JOIN AVSPILLINGER USING(visitorId)
+       GROUP BY ALL)
+    
+    SELECT voksnes voksne, barns barn,
+           snitt_titler `Titler per voksen`,
+           snitt_konsum `Timer konsumert per voksen`,
+           sa_titler `Standardavvik i titler`,
+           sa_konsum `Standardavvik i konsum`
+      FROM AGG
+           JOIN SA USING(voksnes, barns)
+     ORDER BY voksnei, barni
+#+end_src
+
+#+RESULTS:
+| voksne | barn |  Titler per voksen | Timer konsumert per voksen | Standardavvik i titler | Standardavvik i konsum |
+|--------+------+--------------------+----------------------------+------------------------+------------------------|
+|      1 |    0 | 23.032179758496202 |          27.57929571118096 |      33.55702945048243 |     2.8884246278508505 |
+|      1 |  1-3 |  19.38958888619659 |         18.882230321550047 |     21.526237685101464 |      2.142384619316234 |
+|      1 |  > 3 | 18.082278481012658 |         15.185131856540083 |     16.622880308593363 |     2.2979223333929033 |
+|    2-3 |    0 | 14.796130522668207 |         15.204822488529535 |     30.947437107064296 |     2.1210745269955815 |
+|    2-3 |  1-3 | 12.912880812399786 |         11.420247045549024 |     24.597609972455153 |     1.9599117531888546 |
+|    2-3 |  > 3 | 12.692307692307692 |         10.824196047008545 |     24.846346705916773 |     1.6207195281011462 |
+|    > 3 |    0 |              12.15 |         10.113638888888888 |      34.11307323836078 |     1.5428874090352245 |
+
+#+begin_src bigquery
+  #standardSQL
+    WITH
+    KLIENTER AS (
+    SELECT DISTINCT visitorId
+      FROM `nrk-datahub.snowplow_processed.playback_v02`
+     WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+       AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+       AND platform = 'tv'
+    ),
+
+    BRUKERE AS (
+      SELECT DISTINCT visitorId, nrkUserId, userOrProfile,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN KLIENTER USING(visitorId)
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'),
+
+    AVSPILLINGER AS (
+      SELECT nrkuserId, visitorId, seriesTitleOrTitle, SUM(secondsConsumed) konsum_sek
+        FROM BRUKERE
+             LEFT JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(nrkUserId, visitorId)
+             LEFT JOIN `nrk-datahub.metadata_views.metadata_programs` ON id=content.id
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'
+       GROUP BY ALL),
+
+    KLIENTAGG AS (
+      SELECT visitorId,
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile != 'user', nrkUserId, NULL)) Barn,
+             COUNT(IF(userOrProfile != 'user', seriesTitleOrTitle, NULL)) titler,
+             SUM(IF(userOrProfile != 'user', konsum_sek, NULL)) konsum
+        FROM BRUKERE
+             JOIN AVSPILLINGER USING(nrkUserId, visitorId)
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM KLIENTAGG
+       GROUP BY ALL),
+
+    AGG AS (
+      SELECT voksnes, barns, voksnei, barni,
+             SUM(titler) / SUM(barn) snitt_titler,
+             SUM(konsum) / SUM(barn) / 3600 snitt_konsum,
+             COUNT(visitorId) klienter
+        FROM BRUKERGRUPPERING
+       WHERE barni > 0
+       GROUP BY ALL),
+
+    SA AS (
+      SELECT voksnes, barns,
+             STDDEV(IF(userOrProfile != 'user', titler, NULL)) sa_titler,
+             STDDEV(IF(userOrProfile != 'user', konsum_sek / 3600, NULL)) sa_konsum,
+        FROM BRUKERE
+  	   JOIN BRUKERGRUPPERING USING(visitorId)    	   
+             JOIN AVSPILLINGER USING(visitorId)
+       GROUP BY ALL)
+    
+    SELECT voksnes voksne, barns barn,
+           snitt_titler `Titler per barn`,
+           snitt_konsum `Timer konsumert per barn`,
+           sa_titler `Standardavvik i titler`,
+           sa_konsum `Standardavvik i konsum`
+      FROM AGG
+           JOIN SA USING(voksnes, barns)
+     ORDER BY voksnei, barni
+#+end_src
+
+#+RESULTS:
+| voksne | barn |    Titler per barn | Timer konsumert per barn | Standardavvik i titler | Standardavvik i konsum |
+|--------+------+--------------------+--------------------------+------------------------+------------------------|
+|      0 | 1-3  | 10.306632213608959 |       11.783238348167288 |      33.82855992581777 |      2.952172369745312 |
+|      0 | > 3  |               13.2 |       11.233022222222221 |      45.22439107110241 |     1.6882289543973037 |
+|      1 | 1-3  | 10.771477955343988 |        10.76167253044442 |      24.37486568094975 |      2.068292480541051 |
+|      1 | > 3  | 10.004552352048558 |        9.354341595009274 |     29.474932605998678 |     2.3320390296632354 |
+|    2-3 | 1-3  | 10.322245322245323 |        10.27722433972434 |      23.25048738604902 |     1.9434231057606755 |
+|    2-3 | > 3  |  9.089686098654708 |        7.468801694070752 |     26.261002590757904 |     1.6011315056872737 |
+
+Her har vi et annet perspektiv der vi ser på første, andre og tredje kvartil for fordelingen av antall titler og konsum.
+#+begin_src bigquery
+  #standardSQL
+    WITH
+    KLIENTER AS (
+    SELECT DISTINCT visitorId
+      FROM `nrk-datahub.snowplow_processed.playback_v02`
+     WHERE partitionDate BETWEEN '2024-11-09' AND '2024-12-12'
+       AND REGEXP_CONTAINS(content.id, 'KMTE60005[1:6]24')
+       AND platform = 'tv'
+    ),
+
+    BRUKERE AS (
+      SELECT visitorId, 
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile != 'user', nrkUserId, NULL)) Barn,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN KLIENTER USING(visitorId)
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM BRUKERE
+       GROUP BY ALL),
+
+    AVSPILLINGER AS (
+      SELECT visitorId, seriesTitleOrTitle, SUM(secondsConsumed) konsum_sek
+        FROM BRUKERE
+             LEFT JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(visitorId)
+             LEFT JOIN `nrk-datahub.metadata_views.metadata_programs` ON id=content.id
+       WHERE partitionDate  BETWEEN '2024-11-09' AND '2024-12-12'
+         AND platform = 'tv'
+       GROUP BY ALL),
+
+    KLIENTAGG AS (
+      SELECT visitorId, voksnes, barns, voksnei, barni,
+             COUNT(DISTINCT seriesTitleOrTitle) titler,
+             SUM(konsum_sek) / 3600 konsum
+        FROM BRUKERGRUPPERING
+             JOIN AVSPILLINGER USING(visitorId)
+       GROUP BY ALL),
+
+    STATS AS (
+      SELECT DISTINCT voksnes, barns, voksnei, barni,
+             PERCENTILE_DISC(titler, .25) OVER(PARTITION BY voksnes, barns, voksnei, barni) kv1_titler,
+             PERCENTILE_DISC(titler, .5) OVER(PARTITION BY voksnes, barns, voksnei, barni) med_titler,
+             PERCENTILE_DISC(titler, .75) OVER(PARTITION BY voksnes, barns, voksnei, barni) kv3_titler,
+             PERCENTILE_CONT(konsum, .25) OVER(PARTITION BY voksnes, barns, voksnei, barni) kv1_konsum,
+             PERCENTILE_CONT(konsum, .5) OVER(PARTITION BY voksnes, barns, voksnei, barni) med_konsum,
+             PERCENTILE_CONT(konsum, .75) OVER(PARTITION BY voksnes, barns, voksnei, barni) kv3_konsum,
+             COUNT(visitorId) OVER(PARTITION BY voksnes, barns, voksnei, barni) klienter
+        FROM KLIENTAGG)
+    
+    SELECT voksnes voksne, barns barn,
+           kv1_titler, med_titler, kv3_titler,
+           kv1_konsum, med_konsum, kv3_konsum,
+           klienter
+      FROM STATS
+     ORDER BY voksnei, barni
+#+end_src
+** Innhold konsumert
+* Identifisere brukere som representerer flere publikummere
+Jeg skal her forsøke å identifisere brukere som representerer flere publikummere. Før jeg kan gjøre det må jeg undersøke i hvilken grad det er trolig at én bruker brukses av flere publikummere. Det enkleste er å identifisere brukere som representerer både voksne og barn. Dette kan lett gjøres ved å undersøke hva som er blitt konsumert, og hvor ofte og hvor mye det konsumeres. Derimot er det vesentlig vanskeligere å skille ut brukere som brukes av flere voksne eller flere barn. Man må huske på her at det er kliente med kun én bruker som er av interesse i denne omgang. Vi må også undersøke om det er konsum på klienten som ikke er gjort at en pålogget bruker. Dette må jeg jobbe videre med neste uke.
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    BRUKERE AS (
+      SELECT visitorId, 
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile = 'profile', nrkUserId, NULL)) Barn,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM BRUKERE
+       GROUP BY ALL),
+    
+    AVSPILLINGER AS (
+      SELECT visitorId, nrkUserId, seriesTitleOrTitle tittel, SUM(secondsConsumed) / 3600 konsum
+        FROM BRUKERE
+             LEFT JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(visitorId)
+             LEFT JOIN `nrk-datahub.metadata_views.metadata_programs` ON id=content.id
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'
+       GROUP BY ALL),
+
+    KRONOLOGI AS (
+      SELECT visitorId, nrkUserId,
+  	         LAG(nrkUserId) OVER(PARTITION BY visitorId ORDER BY partitionDate) IS NOT NULL AND nrkUserId IS NULL pa_av
+             FROM BRUKERE
+             LEFT JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(visitorId)
+             LEFT JOIN `nrk-datahub.metadata_views.metadata_programs` ON id=content.id
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'),
+
+    KRONOLOGISJEKK AS (
+      SELECT DISTINCT visitorId,
+             LOGICAL_AND(pa_av) OVER(PARTITION BY visitorId) pa_av
+        FROM KRONOLOGI),
+
+    SJEKK AS (
+      SELECT visitorId, pa_av,
+             COUNT(IF(nrkUserId IS NULL, tittel, NULL)) ikke_pl_titler,
+             COUNT(IF(nrkUserId IS NOT NULL, tittel, NULL)) pl_titler,
+             SUM(IF(nrkUserId IS NULL, konsum, NULL)) ikke_pl_konsum,
+             SUM(IF(nrkUserId IS NOT NULL, konsum, NULL)) pl_konsum
+        FROM AVSPILLINGER
+             JOIN BRUKERGRUPPERING USING(visitorId)
+             JOIN KRONOLOGISJEKK USING(visitorId)
+       WHERE voksnei = 1 AND barni = 0
+       GROUP BY ALL)
+
+  SELECT DISTINCT COUNTIF(SAFE_DIVIDE(pl_titler, pl_titler + ikke_pl_titler) < 1) OVER() / COUNT(visitorId) OVER() `Andel klienter med ikke- og pålogget konsum`,
+         COUNT(IF(pa_av, visitorId, NULL)) OVER() `Antall som logger av etter å ha logget på`,
+         PERCENTILE_CONT(SAFE_DIVIDE(pl_titler, pl_titler + ikke_pl_titler), .01) OVER() `Andel påloggede titler for første persentil`,
+         PERCENTILE_DISC(IF(SAFE_DIVIDE(pl_titler, pl_titler + ikke_pl_titler) < .5, ikke_pl_titler, NULL), .5) OVER() `Median antall ikke-påloggede titler`,
+         PERCENTILE_DISC(IF(SAFE_DIVIDE(pl_titler, pl_titler + ikke_pl_titler) > .5, pl_titler, NULL), .5) OVER() `Median antall påloggede titler`,
+         COUNT(visitorId) OVER() `Antall klienter`
+    FROM SJEKK
+#+end_src
+
+#+RESULTS:
+| Andel klienter med ikke- og pålogget konsum | Antall som logger av etter å ha logget på | Andel påloggede titler for første persentil | Median antall ikke-påloggede titler | Median antall påloggede titler | Antall klienter |
+|---------------------------------------------+-------------------------------------------+---------------------------------------------+-------------------------------------+--------------------------------+-----------------|
+|                         0.03429734742619035 |                                         0 |                                         0.5 |                                   8 |                              4 |         1259456 |
+
+Som vi ser er det 3,4 % av klientene med kun én pålogget voksenprofil som også har konsum på ikke påloggete brukere. Det tyder på at alle disse er brukere som har gått over fra å bruke klienten avlogget til å bruke den pålogget. For 1 % er andelen bruk som blir gjort av ikke-påloggete brukere større enn bruk som blir gjort av påloggede brukere. Median antall titler som blir konsumert av ikke-påloggede brukere der andelen konsumerte titler er større enn andelen påloggede konsumerte titler, er åtte. Til sammenligning er den bare fire for påloggede. Videre kommer jeg til å se bort fra klientene med ikke-pålogget konsum. Jeg tenker derfor at den avloggede bruken kan ses som del av den påloggede bruken, og at jeg kan se klientene vi har tittet på over under ett.
+
+** Skille ut brukere som brukes av barn og voksne
+Utgangspunktet for undersøkelsen er følgende spørring.
+
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    BRUKERE AS (
+      SELECT visitorId, 
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile = 'profile', nrkUserId, NULL)) Barn,
+             2025 - birthYear alder,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM BRUKERE
+       GROUP BY ALL),
+
+    AVSPILLINGER AS (
+      SELECT visitorId, 
+             COUNT(DISTINCT IF(isInSuperUniverse, seriesTitleOrTitle, NULL)) barnetitler,
+             SUM(IF(isInSuperUniverse, secondsConsumed, NULL)) / 3600 barnetittelkonsum,
+             COUNT(DISTINCT IF(NOT isInSuperUniverse, seriesTitleOrTitle, NULL)) voksentitler,
+             SUM(IF(NOT isInSuperUniverse, secondsConsumed, NULL)) / 3600 voksentittelkonsum,
+        FROM BRUKERE
+             LEFT JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(visitorId)
+             LEFT JOIN `nrk-datahub.metadata_views.metadata_programs` ON id=content.id
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'
+       GROUP BY ALL)
+    
+    SELECT alder IS NULL har_alder,
+           COUNT(IF(barnetitler > 0 AND voksentitler > 0, visitorId, NULL)) / COUNT(visitorId) `Andel klienter med barne og voksne`,
+           COUNT(IF(barnetitler = 0 AND voksentitler > 0, visitorId, NULL)) / COUNT(visitorId) `Andel klienter med kun voksne`,
+           COUNT(IF(barnetitler > 0 AND voksentitler = 0, visitorId, NULL)) / COUNT(visitorId) `Andel klienter med kun barn`,
+           COUNT(visitorId) Klienter
+      FROM AVSPILLINGER
+           JOIN BRUKERGRUPPERING USING(visitorId)
+     WHERE voksnei = 1 AND barni = 0
+     GROUP BY ALL
+#+end_src
+
+#+RESULTS:
+| har_alder | Andel klienter med barne og voksne | Andel klienter med kun voksne | Andel klienter med kun barn | Klienter |
+|-----------+------------------------------------+-------------------------------+-----------------------------+----------|
+| false     |                0.19704067812251477 |             0.736030551340964 |        0.056632349787883146 |   736858 |
+| true      |                 0.1888022777889604 |            0.7182664649468538 |         0.08178580472569785 |   616036 |
+
+I første omgang er det klienter med barn og voksne som antakelig kan enklest vise seg å bli brukt av flere publikummere. Neste steg er å se på fordelingen mellom konsum av barneinnhold og vokseninnhold
+
+
+* Tidligere forsøk
+Dette gjør jeg ved å sammenligne brukere som er pålogget som eneste bruker på en klient med klienter som har flere påloggede brukere. Tanken er at klienter med flere påloggede brukere vil ha lignende bruksmønster som klienter med kun én pålogget bruker der denne brukeren representerer flere publikummere.
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    BRUKERE AS (
+      SELECT visitorId, 
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile = 'profile', nrkUserId, NULL)) Barn,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM BRUKERE
+       GROUP BY ALL)--,
+
+    SELECT voksne, barn, klienter
+    FROM (SELECT voksnes voksne, barns barn, voksnei, barni, COUNT(visitorId) klienter
+            FROM BRUKERGRUPPERING
+           GROUP BY ALL)
+    ORDER BY voksnei, barni
+#+end_src
+Her er det klientene med flere enn én pålogget profil som kan brukes som grunnlag for å modellere hvor vidt de klientene med kun én pålogget profil i virkeligheten representerer flere publikummere. Hvordan skal vi gå frem for å modellere hvilke av brukerne som representerer flere publikummere? Dersom vi hadde hatt klienter med én pålogget bruker som vi visste representerte én publikummer, og klienter med flere påloggede brukere som vi visste representrte én publikummer hver, kunne vi brukt disse som modell for klienter som brukes av kun én bruker og klienter som brukes av flere brukere. Problemet er at vi ikke vet om klienter med kun én pålogget bruker egentlig representerer flere publikummere. Derimot er det tydeligere at klienter med flere påloggede brukere representerer flere publikummere. Så hvordan bruker vi denne informasjonen? Hvis vi kan lage en modell som er trent på å skille klienter som brukes av flere publikummere fra dem som ikke gjør det, vil vi i prinsippet sitte igjen med dem som brukes av kun én publikummer.
+
+Hvilke variabler skal vi så bruke for å modellere dette? Fra tidligere undersøkelser vet vi at det konsumeres flere /ulike/ titler på klienter med flere påloggede profiler, og at total konsumtid er lengre. Antakelig vil det også konsumeres på flere tidspunkt i døgnet på klienter som brukes av flere publikummere. Dette må ennå undersøkes. Antakelsen som dette hviler på er at profiler som brukes på klienter med flere påloggede profiler i større grad representerer kun én bruker.
+** Utforskning av variabler
+La oss starte med å se på sannsynlighetsfordelingene til variablene vi tenker å bruke. For antall titler og timer konsum bruker jeg denne spørringen.
+#+name: titler_og_konsum
+#+begin_src bigquery
+  #standardSQL
+    WITH
+    BRUKERE AS (
+      SELECT visitorId, 
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile = 'profile', nrkUserId, NULL)) Barn,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM BRUKERE
+       GROUP BY ALL),
+
+    AVSPILLINGER AS (
+      SELECT visitorId, nrkUserId, userOrProfile, COUNT(seriesTitleOrTitle) titler, SUM(secondsConsumed) konsum_sek
+        FROM BRUKERE
+             LEFT JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(visitorId)
+             LEFT JOIN `nrk-datahub.metadata_views.metadata_programs` ON id=content.id
+  	   JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'
+       GROUP BY ALL)
+
+    SELECT sammensetning, userOrProfile, titler_per_bruker, konsum_per_bruker, brukere
+      FROM (SELECT CONCAT('voksne: ', voksnes, ', barn: ', barns) sammensetning,
+                   voksnei, barni, userOrProfile,
+  		 titler titler_per_bruker,
+                   CAST(konsum_sek / 1800 AS INT64) / 2 konsum_per_bruker,
+                   COUNT(nrkUserId) brukere
+              FROM BRUKERGRUPPERING
+                   JOIN AVSPILLINGER USING(visitorId)
+             GROUP BY ALL)
+     ORDER BY voksnei, barni, brukere DESC
+#+end_src
+*** Antall titler
+#+begin_src python :exports none :noweb yes
+  spørring = """
+  <<titler_og_konsum>>
+  """
+#+end_src
+
+#+begin_src python
+  import pandas as pd
+  import matplotlib.pyplot as plt
+  import pandas_gbq
+  import numpy as np
+#+end_src
+
+#+begin_src python
+  df = pandas_gbq.read_gbq(spørring, dialect = "standard")
+#+end_src
+
+#+begin_src python :results graphics file value replace :file figurer/titler.png
+  fig_s = df[["sammensetning", "userOrProfile", "titler_per_bruker", "brukere"]] \
+      .groupby(["sammensetning", "userOrProfile", "titler_per_bruker"]) \
+      .sum()
+  fig,ax = plt.subplots(figsize=(11,7))
+  sammensetninger = df.sammensetning.unique().tolist()
+  enslige_voksne = ["voksne: 1, barn: 0"]
+  enslige_voksne_ind = sammensetninger.index(enslige_voksne[0])
+  voksne_uten_barn_ind = [sammensetninger.index("voksne: 2-3, barn: 0"), sammensetninger.index("voksne: > 3, barn: 0")]
+  voksne_uten_barn = [sammensetninger[voksne_uten_barn_ind[0]]] + [sammensetninger[voksne_uten_barn_ind[1]]]
+  voksne_med_barn = sammensetninger[1+enslige_voksne_ind:voksne_uten_barn_ind[0]] + \
+      sammensetninger[1+voksne_uten_barn_ind[0]:voksne_uten_barn_ind[1]] + \
+      sammensetninger[1+voksne_uten_barn_ind[1]:]
+  grupper = [enslige_voksne, voksne_uten_barn, voksne_med_barn]
+  for g, l zip(grupper, ["Enslige voksne", "Voksne uten barn", "Voksne med barn"]):
+      d = fig_s.loc[g].groupby("titler_per_bruker").sum()
+      d = d / d.sum()
+      ax.plot(d.index, d, label=l)
+      # print(f"g: {g}\nl: {l}\n")
+
+  ax.legend()
+  ax.set_xlim([0,200])
+  fig
+#+end_src
+
+#+RESULTS:
+[[file:figurer/titler.png]]
+
+
+*** Timer med konsum
+#+begin_src python :results graphics file value replace :file figurer/konsum.png
+  fig_s = df[["sammensetning", "konsum_per_bruker", "brukere"]].groupby(["sammensetning", "konsum_per_bruker"]).sum()
+  fig,ax = plt.subplots(figsize=(11,7))
+  sammensetninger = df.sammensetning.unique().tolist()
+  grupper = sammensetninger[1+sammensetninger.index("voksne: 1, barn: 0"):] # tar ikke med voksne: 0, siden det stort sett kun er én barneprofil på disse
+  for g, l in zip(grupper, ["Enslige voksne", "Voksne uten barn", "Voksne med barn"]):
+      d = fig_s.loc[g].groupby("konsum_per_bruker").sum()
+      d = d / d.sum()
+      ax.plot(d.index, d, label=l)
+      # print(f"g: {g}\nl: {l}\n")
+
+  ax.legend()
+  ax.set_xlim([0,200])
+  fig
+#+end_src
+
+#+RESULTS:
+[[file:figurer/konsum.png]]
+
+* Notater
+- Hvilke titler har klientene på 1. - 10. plass?
+- Når på døgnet konsumeres de ulike titlene?
+- Hvilken profil konsumeres titlene på?
+- Hvordan er sammensetningen av ulike  profiler på TV-klientene, og hva konsumeres på disse klientene?
+- Hvor stor andel av total konsum på klienten består av topp tre titler?
+- Hvordan fordeler konsumet på klienten seg på påloggede profiler?
