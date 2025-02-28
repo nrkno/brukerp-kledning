@@ -1,5 +1,5 @@
 #+TITLE: Bekledning av brukere fra hva vi vet
-#+DATE: 27.01.1986
+#+DATE: 27.01.2025
 #+AUTHOR: Emil
 #+STARTUP: hideblocks
 #+STARTUP: fold
@@ -9,14 +9,18 @@
 
 
 * Innledning
-NRK TV ønsker seg mer informasjon om brukerne våre basert på det vi vet. Dette har sitt utspring i at førsteparts data som vi får gjennom sporing med Snowplow ikke gir oss data på om det er flere som ser et innhold, slik TVOV-undersøkelsen gjør. Kan vi klare å inferere hvilket innhold som konsumeres av flere samtidig på samme skjerm? Det skal vi prøve å undersøke i dette dokumentet.
+NRK TV ønsker seg mer informasjon om brukerne våre basert på det vi vet. Dette er i første omgang å identifisere hvilke brukere representerer flere publikummere.
 * Kort oppsummert
 Her kommer en oppsummering av funnene.
 1. I løpet av de siste tretti dagene er det ca. 1,35 millioner TV-klienter som som er logget på med kun én bruker. Circa 90 000 av klientene konsumerer kun barneprogrammer. Disse kan helt sikkert regnes som en del av en familie.
-2. I løpet av samme periode er det ca. 256 000 klienter hvor det konsumeres både barne- og voksenprogrammer.
+2. I løpet av samme periode er det ca. 256 000 klienter hvor det konsumeres både barne- og voksenprogrammer. Disse kan muligens representere flere publikummere.
 * Fremgangsmåte
-Vi begrenser oss til å se på konsum på storskjerm fra påloggede brukere. Videre bruker vi innhold med en stor samseingsverdi som Maskorama, ESC og Kakemesterskapet til å filtrere ut brukere som muligens ser sammen med flere i familien. Deretter undersøker vi om disse brukerne har barneprofiler tilknyttet seg, og om klienten har blitt logget på av andre voksenbrukere. Deretter sjekker vi hvilket annet innhold som konsumeres av denne profilen, og om de andre profilene konsumerer noe innhold. Denne innsikten blir grunnlaget for å identifisere annet innhold som fungerer for samseing.
-* Del 1
+Vi begrenser oss til å se på konsum på storskjerm fra påloggede brukere. Det enkleste vil være å isolere klienter med kun én pålogget voksenprofil, og så undersøke hva som konsumeres på denne profilen. Tanken er at profiler som det konsumeres en viss andel barneinnhold på vil deles av både voksne og barn, så denne vil kunne representere seing i en husstand eller familie.
+* Del 1 :noexport
+Den opprinnelige motivasjonen sprang ut fra at førsteparts data som vi får gjennom sporing med Snowplow ikke gir oss data på om det er flere som ser et innhold samtidig, slik TVOV-undersøkelsen gjør. Vi stilte spørsmålet: Kan vi klare å inferere hvilket innhold som konsumeres av flere samtidig på samme skjerm? Dette avsnittet var starten på å prøve å undersøke dette.
+
+Trolig vil det være en umulig oppgave. Tanken var å bruke innhold med en stor samseingsverdi som Maskorama, ESC og Kakemesterskapet til å filtrere ut brukere som muligens ser sammen med flere i familien. Deretter undersøker vi om disse brukerne har barneprofiler tilknyttet seg, og om klienten har blitt logget på av andre voksenbrukere. Deretter sjekker vi hvilket annet innhold som konsumeres av denne profilen, og om de andre profilene konsumerer noe innhold. Dette skulle danne grunnlaget for å identifisere profiler som blir brukt til samseing.
+
 Finner tidsperioden for Maskorama
 #+begin_src bigquery
   #standardSQL
@@ -233,7 +237,7 @@ Nå skal vi se på hvor mye tid som brukes på konsum og hvordan det fordeler se
        FROM ANTALL
       ORDER BY 1, 4 DESC
 #+end_src
-* Del 2
+* Del 2 :noexport
 Hensikten med denne øvelsen er å finne ut om vi kan si noe om hvor vidt flere publikummere ser på samme TV-skjerm samtidig (samtitting). Vi har ikke data på dette, så vi må gjøre en del gjetninger på indirekte mål vi kan bruke som kanskje korrelerer med samtititting. Her er en liste:
 - Samtitting foregår i større grad på TV-klienter som logges på med flere profiler.
 - Samtitting foregår i større grad på visse typer programmer.
@@ -957,7 +961,9 @@ Her har vi et annet perspektiv der vi ser på første, andre og tredje kvartil f
 #+end_src
 ** Innhold konsumert
 * Identifisere brukere som representerer flere publikummere
-Jeg skal her forsøke å identifisere brukere som representerer flere publikummere. Før jeg kan gjøre det må jeg undersøke i hvilken grad det er trolig at én bruker brukses av flere publikummere. Det enkleste er å identifisere brukere som representerer både voksne og barn. Dette kan lett gjøres ved å undersøke hva som er blitt konsumert, og hvor ofte og hvor mye det konsumeres. Derimot er det vesentlig vanskeligere å skille ut brukere som brukes av flere voksne eller flere barn. Man må huske på her at det er kliente med kun én bruker som er av interesse i denne omgang. Vi må også undersøke om det er konsum på klienten som ikke er gjort at en pålogget bruker. Dette må jeg jobbe videre med neste uke.
+Vi skal her forsøke å identifisere brukere som representerer flere publikummere. Det enkleste er å identifisere brukere som representerer både voksne og barn. Ved å anta at man kan skille publimummere fra hverandre ut fra innholdskonsum, kan dette nok enklest gjøres ved å undersøke hva som er blitt konsumert, og hvor ofte og hvor mye det konsumeres. Derimot er det vesentlig vanskeligere å skille ut brukere som brukes av flere voksne eller flere barn. Man må huske på her at det er kliente med kun én pålogget bruker som er av interesse i denne omgang.
+
+Vi må også undersøke om det er konsum på klienten som ikke er gjort av en pålogget bruker. Det gjør vi ved hjelp av følgende spørring.
 #+begin_src bigquery
   #standardSQL
   WITH
@@ -1050,9 +1056,11 @@ Jeg skal her forsøke å identifisere brukere som representerer flere publikumme
 |---------------------------------------------+-------------------------------------------+---------------------------------------------+-------------------------------------+--------------------------------+-----------------|
 |                         0.03429734742619035 |                                         0 |                                         0.5 |                                   8 |                              4 |         1259456 |
 
-Som vi ser er det 3,4 % av klientene med kun én pålogget voksenprofil som også har konsum på ikke påloggete brukere. Det tyder på at alle disse er brukere som har gått over fra å bruke klienten avlogget til å bruke den pålogget. For 1 % er andelen bruk som blir gjort av ikke-påloggete brukere større enn bruk som blir gjort av påloggede brukere. Median antall titler som blir konsumert av ikke-påloggede brukere der andelen konsumerte titler er større enn andelen påloggede konsumerte titler, er åtte. Til sammenligning er den bare fire for påloggede. Videre kommer jeg til å se bort fra klientene med ikke-pålogget konsum. Jeg tenker derfor at den avloggede bruken kan ses som del av den påloggede bruken, og at jeg kan se klientene vi har tittet på over under ett.
+Som vi ser er det 3,4 % av klientene med kun én pålogget voksenprofil som også har konsum på ikke påloggete brukere. Det tyder på at alle disse er brukere som har gått over fra å bruke klienten avlogget til å bruke den pålogget. For 1 % av klientene er andelen bruk som blir gjort av ikke-påloggete brukere større enn bruk som blir gjort av påloggede brukere. Median antall titler som blir konsumert av ikke-påloggede brukere der andelen konsumerte titler er større enn andelen påloggede konsumerte titler, er åtte. Til sammenligning er den bare fire for påloggede. Totalt sett kan vi derfor vurdere det til at den avloggede bruken kan ses som del av den påloggede bruken.
 
-** Skille ut brukere som brukes av barn og voksne
+** Dele inn brukere etter barne- og vokseninnhold
+Vi skal nå ta fatt på å skille brukere som brukes kun av barn (kun barneinnhold), kun av voksne (kun vokseninnhold), og av begge (både barne- og vokseninnhold).
+
 Utgangspunktet for undersøkelsen er følgende spørring.
 
 #+begin_src bigquery
@@ -1062,7 +1070,7 @@ Utgangspunktet for undersøkelsen er følgende spørring.
       SELECT visitorId, 
              COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
              COUNT(DISTINCT IF(userOrProfile = 'profile', nrkUserId, NULL)) Barn,
-             2025 - birthYear alder,
+ --            2025 - birthYear alder,
         FROM `nrk-datahub.snowplow_processed.views_v02`
              JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
        WHERE partitionDate > CURRENT_DATE - 30
@@ -1106,15 +1114,14 @@ Utgangspunktet for undersøkelsen er følgende spørring.
         FROM BRUKERE
              LEFT JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(visitorId)
              LEFT JOIN `nrk-datahub.metadata_views.metadata_programs` ON id=content.id
-       WHERE partitionDate > CURRENT_DATE - 30
+       WHERE partitionDate  > CURRENT_DATE - 30
          AND platform = 'tv'
          AND nrkService = 'nrktv'
        GROUP BY ALL)
     
-    SELECT alder IS NULL har_alder,
-           COUNT(IF(barnetitler > 0 AND voksentitler > 0, visitorId, NULL)) / COUNT(visitorId) `Andel klienter med barne og voksne`,
-           COUNT(IF(barnetitler = 0 AND voksentitler > 0, visitorId, NULL)) / COUNT(visitorId) `Andel klienter med kun voksne`,
-           COUNT(IF(barnetitler > 0 AND voksentitler = 0, visitorId, NULL)) / COUNT(visitorId) `Andel klienter med kun barn`,
+    SELECT COUNT(IF(barnetitler > 0 AND voksentitler > 0, visitorId, NULL)) `Klienter med blandet konsum`,
+           COUNT(IF(barnetitler = 0 AND voksentitler > 0, visitorId, NULL)) `Klienter med kun voksent konsum`,
+           COUNT(IF(barnetitler > 0 AND voksentitler = 0, visitorId, NULL)) `Klienter med kun barnekonsum`,
            COUNT(visitorId) Klienter
       FROM AVSPILLINGER
            JOIN BRUKERGRUPPERING USING(visitorId)
@@ -1123,15 +1130,158 @@ Utgangspunktet for undersøkelsen er følgende spørring.
 #+end_src
 
 #+RESULTS:
-| har_alder | Andel klienter med barne og voksne | Andel klienter med kun voksne | Andel klienter med kun barn | Klienter |
-|-----------+------------------------------------+-------------------------------+-----------------------------+----------|
-| false     |                0.19704067812251477 |             0.736030551340964 |        0.056632349787883146 |   736858 |
-| true      |                 0.1888022777889604 |            0.7182664649468538 |         0.08178580472569785 |   616036 |
+| Klienter med blandet konsum | Klienter med kun voksent konsum | Klienter med kun barnekonsum | Klienter |
+|-----------------------------+---------------------------------+------------------------------+----------|
+|                      190742 |                          736511 |                        51959 |   986539 |
 
-I første omgang er det klienter med barn og voksne som antakelig kan enklest vise seg å bli brukt av flere publikummere. Neste steg er å se på fordelingen mellom konsum av barneinnhold og vokseninnhold
+Vi kan allerede her konkludere med at klienter som det kun konsumeres barneinnhold på, og da antakelig er del av en husholdning eller familie, utgjør ca. 52 000 klienter i perioden vi ser på.
+
+Videre er det ca. 190 000 klienter som det konsumeres både voksen- og barneinnhold på. Dette kan enten være enkeltbrukere som både konsumerer innhold for barn og voksne, eller det kan være brukere som benyttes av barn til å konsumere barneinnhold og av voksne til å konsumere vokseninnhold. Neste steg er derfor å se på fordelingen mellom konsum av barneinnhold og vokseninnhold for å avdekke dette.
+
+** Undersøkelse av brukere med blandet konsum
+Blandet bruk er komplisert å trekke slutninger fra. Grunnen er at det kan være mange årsaker til blandet bruk. Årsaken vi er mest interessert i er en voksen og et barn som bruker samme profil i det daglige. Andre årsaker kan være
+1. Én bruker som konsumerer både vokseninnhold og barneinnhold av ulike årsaker. Kanskje vedkommende er i en alder hvor begge deler er interessant, eller enkelte typer barneinnhold fenger kanskje også voksne.
+2. En voksen har sporadisk besøk av barn som konsumerer barneinnhold på deres bruker, men de konstituerer ikke en familie.
+3. Barneinnhold eller vokseninnhold konsumeres med en feiltakelse, og forurrenser dermed det som ellers hadde vært ren barne- eller voksenkonsum.
 
 
-* Tidligere forsøk
+Tilfellene i 2. og 3. kan lukes ut ved å sette et minimum for konsum av både barneinnhold og vokseninnhold. Tilfellet i 1. vil allikevel ikke være mulig å skille ut uten en dypere undersøkelse. Her må muligens konsumsammensetningen tas i nærmere ettersyn for å bli klokere.
+
+Hva er så en fornuftig grense på konsum? I tilfellene hvor en voksen og et barn deler en profil vil mer enn tre voksentitler og mer enn tre barnetitler være en grense hvor det begynner å bli naturlig fra et brukerståsted å skille bruken i to profiler. For å fjerne tilfeller med feilstartede titler og sporadisk bruk, kan det være hensiktsmessig å sette en grense på minimum to timer konsum av vokseninnhold og to timer av barneinnhold. Dette vil ikke fjerne all sporadisk bruk.
+#+name: FELLES
+#+begin_src bigquery :exports none
+  #standardSQL
+  WITH
+    BRUKERE AS (
+      SELECT visitorId, 
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) Voksne,
+             COUNT(DISTINCT IF(userOrProfile = 'profile', nrkUserId, NULL)) Barn,
+            --  2025 - birthYear alder,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'
+       GROUP BY ALL),
+
+    BRUKERGRUPPERING AS (
+      SELECT *,
+             CASE
+               WHEN Voksne = 0 THEN Voksne
+               WHEN Voksne = 1 THEN Voksne
+               WHEN Voksne < 4 THEN 2
+               ELSE 4
+             END voksnei,
+             CASE
+               WHEN Barn = 0 THEN Barn
+               WHEN Barn < 4 THEN 1
+               ELSE 4
+             END barni,
+             CASE
+               WHEN Voksne = 0 THEN '0'
+               WHEN Voksne = 1 THEN '1'
+               WHEN Voksne < 4 THEN '2-3'
+               ELSE '> 3'
+             END voksnes,
+             CASE
+               WHEN Barn = 0 THEN '0'
+               WHEN Barn < 4 THEN '1-3'
+               ELSE '> 3'
+             END barns,
+        FROM BRUKERE
+       GROUP BY ALL),
+
+    AVSPILLINGER AS (
+      SELECT visitorId, isInSuperUniverse, seriesTitleOrTitle tittel, SUM(secondsConsumed) konsum_sek
+        FROM BRUKERE
+             LEFT JOIN `nrk-datahub.snowplow_processed.playback_v02` USING(visitorId)
+             LEFT JOIN `nrk-datahub.metadata_views.metadata_programs` ON id=content.id
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'
+         AND secondsConsumed > 0
+       GROUP BY ALL),
+
+    ANTALL_TITLER AS (
+      SELECT visitorId,
+             COUNT(DISTINCT IF(isInSuperUniverse, tittel, NULL)) barnetitler,
+             COUNT(DISTINCT tittel) titler,
+             SUM(IF(isInSuperUniverse, konsum_sek, NULL)) / 3600 barnetittelkonsum,
+             SUM(konsum_sek) / 3600 tittelkonsum,
+        FROM AVSPILLINGER
+       GROUP BY ALL)
+#+end_src
+
+#+begin_src bigquery :exports none
+
+
+    ANTALL_TITLER AS (
+      SELECT visitorId,
+             COUNT(DISTINCT IF(isInSuperUniverse, tittel, NULL)) barnetitler,
+             COUNT(DISTINCT IF(NOT isInSuperUniverse, tittel, NULL)) voksentitler,
+             SUM(IF(isInSuperUniverse, konsum_sek, NULL)) / 3600 barnetittelkonsum,
+             SUM(IF(NOT isInSuperUniverse, konsum_sek, NULL)) / 3600 voksentittelkonsum,
+        FROM AVSPILLINGER
+       GROUP BY ALL),
+    
+    RANGERING AS (
+      SELECT visitorId, isInSuperUniverse, tittel, konsum_sek,
+             ROW_NUMBER() OVER(PARTITION BY visitorId, isInSuperUniverse ORDER BY konsum_sek DESC) plass
+        FROM AVSPILLINGER
+       WHERE tittel IS NOT NULL),
+
+    TITTELAGG AS (
+      SELECT visitorId,
+             STRING_AGG(IF(isInSuperUniverse, tittel, ''), ', ' ORDER BY tittel) top3barnetitler,
+             SUM(IF(isInSuperUniverse, konsum_sek, NULL)) tot_konsum_barnetitler,
+             STRING_AGG(IF(NOT isInSuperUniverse, tittel, ''), ', ' ORDER BY tittel) top3voksentitler,
+             SUM(IF(NOT isInSuperUniverse, konsum_sek, NULL)) tot_konsum_voksentitler,
+        FROM RANGERING
+       WHERE plass < 4
+       GROUP BY ALL)
+
+    SELECT RANGERING.*, TITTELAGG.*
+      FROM RANGERING
+           JOIN BRUKERGRUPPERING USING(visitorId)
+           JOIN ANTALL_TITLER USING(visitorId)
+           JOIN TITTELAGG USING(visitorid)
+     WHERE barni = 0 AND voksnei = 1
+       AND barnetitler > 0 AND voksentitler > 0
+     ORDER BY RANGERING.visitorId, plass
+    -- SELECT top3barnetitler, top3voksentitler,
+    --       --  PERCENTILE_CONT(SAFE_DIVIDE(tot_konsum_barnetitler, barnetittelkonsum), .5) OVER(PARTITION BY top3banretitler) mediankonsumandel_barn,
+    --       --  PERCENTILE_CONT(barnetittelkonsum, .5) mediankonsu_barn,
+    --       --  PERCENTILE_DISC(barnetitler, .5) median_antall_barnetitler
+    --        COUNT(DISTINCT visitorId) klienter
+    --   FROM BRUKERGRUPPERING
+    --        JOIN ANTALL_TITLER USING(visitorId)
+    --        JOIN TITTELAGG USING(visitorId)
+    --  WHERE voksnei = 1 AND barni = 0
+    --    AND barnetitler > 0 AND voksentitler > 0
+    --  GROUP BY ALL
+    --  ORDER BY 1, 2
+#+end_src
+
+#+begin_src bigquery :noweb yes
+  <<FELLES>>
+
+    SELECT barnetitler > 3 AND titler - barnetitler > 3 AND barnetittelkonsum > 2 AND tittelkonsum - barnetittelkonsum > 2 Treff,
+           COUNT(visitorId) `Antall klienter`
+      FROM BRUKERGRUPPERING 
+           JOIN ANTALL_TITLER USING(visitorId)
+     WHERE barni = 0 AND voksnei = 1
+       AND barnetitler > 0 AND titler > barnetitler
+     GROUP BY ALL
+     ORDER BY 1
+#+end_src
+
+#+RESULTS:
+| Treff | Antall klienter |
+|-------+-----------------|
+| false |          145630 |
+| true  |           38266 |
+
+* Tidligere forsøk :noexport
 Dette gjør jeg ved å sammenligne brukere som er pålogget som eneste bruker på en klient med klienter som har flere påloggede brukere. Tanken er at klienter med flere påloggede brukere vil ha lignende bruksmønster som klienter med kun én pålogget bruker der denne brukeren representerer flere publikummere.
 #+begin_src bigquery
   #standardSQL
@@ -1316,7 +1466,7 @@ La oss starte med å se på sannsynlighetsfordelingene til variablene vi tenker 
 #+RESULTS:
 [[file:figurer/konsum.png]]
 
-* Notater
+* Notater :noexport
 - Hvilke titler har klientene på 1. - 10. plass?
 - Når på døgnet konsumeres de ulike titlene?
 - Hvilken profil konsumeres titlene på?
