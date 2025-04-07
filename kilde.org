@@ -1373,7 +1373,205 @@ Hva er så en fornuftig grense på konsum? I tilfellene hvor en voksen og et bar
 | false |          145630 |
 | true  |           38266 |
 ** Undersøkelse av brukere med kun voksenkonsum
-For å klare å undersøke om en pålogget bruker som kun konsumerer voksent innhold representerer flere publikummere, må vi sammenlingne bruken med brukere som vi /vet/ ikke representerer flere publikummere. Vi kan være tilbøyelige til å tro at brukere som er pålogget samme klient som andre brukere i større grad representerer bruken til én publikummer. Det kan derfor være fruktbart å sammenligne klienter med én pålogget bruker (som muligens kan representere flere publikummere) med klienter med flere påloggede voksenbrukere (som vi antar representerer én publikummer hver).
+For å klare å undersøke om en pålogget bruker som kun konsumerer voksent innhold representerer flere publikummere, må vi sammenlingne bruken med brukere som vi /vet/ ikke representerer flere publikummere. /Hvordan vet vi at en bruker ikke representerer flere publikummere?/
+
+Ser vi på klienter med flere påloggede voksenbrukere, kan vi være tilbøyelige til å tro at disse brukerne i større grad representerer bruken til én publikummer. Det kan derfor være fruktbart å sammenligne klienter med én pålogget bruker (som muligens kan representere flere publikummere) med klienter med flere påloggede voksenbrukere (som vi antar representerer én publikummer hver).
+
+Hva skal vi sammenligne for å finne ut om de er like eller forskjellige? Her er en kladd over ideer:
+- Er brukeren logget på flere tjenester?
+- Er brukeren pålogget flere enheter?
+- Er der flere serier som følges parallelt? Jeg tror de fleste vil følge et begrenset antall serier i tillegg til nyheter og noe humorgreier.
+- Er det flere påbegynte serier som er blitt forlatt? Det kan være vanskelig å finne noe å se sammen. Serier som man starter å se sammen blir kanskje ikke fullført fordi den ene ikke er interessert?
+- 
+*** Tjenester og plattformer
+Jeg begynner med å undersøke hvordan tjenester og plattformer brukes av brukere som er eneste påloggede bruker på en TV-klient og brukere som deler en TV-klient med flere påloggede brukere. Jeg starter med å undersøke i hvilken grad brukere er pålogget som eneste bruker på én TV-klient og sammen med andre på en annen TV-klient.
+
+Først undersøker jeg hvor mange brukere som ikke er pålogget samme klient som noen annen bruker.
+#+name: spørring
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    BRUKERPROFIL AS (
+      SELECT DISTINCT visitorId, nrkUserId, userOrProfile
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'),
+    
+    BRUKER_BRUKER_KOBLING AS (
+      SELECT DISTINCT bp1.nrkUserId, bp1.visitorId, bp2.nrkUserId koblet_til, bp2.userOrProfile
+        FROM BRUKERPROFIL bp1
+             JOIN BRUKERPROFIL bp2 USING(visitorId)
+       WHERE bp1.userOrProfile = 'user'),
+    
+    KLYNGER AS (
+      SELECT DISTINCT nrkUserId, visitorId, STRING_AGG(koblet_til) OVER(PARTITION BY visitorId ORDER BY koblet_til) brukerklynge
+        FROM BRUKER_BRUKER_KOBLING),
+
+    OPPTELLING AS (
+      SELECT nrkUserId, visitorId,
+            COUNT(DISTINCT IF(nrkUserId != koblet_til AND userOrProfile = 'user', koblet_til, NULL)) deler_klientene_med_voksne,
+            COUNT(DISTINCT IF(nrkUserId != koblet_til AND userOrProfile != 'user', koblet_til, NULL)) deler_klientene_med_barn
+        FROM BRUKER_BRUKER_KOBLING
+      GROUP BY ALL),
+    
+    SJEKK_OM_ENESTE AS (
+      SELECT DISTINCT nrkUserId, LOGICAL_AND(deler_klientene_med_voksne + deler_klientene_med_barn = 0) OVER(PARTITION BY nrkUserId) eneste
+        FROM OPPTELLING),
+
+    KLIENTOPPTELLING AS (
+      SELECT nrkUserId, COUNT(DISTINCT visitorId) klienter
+        FROM OPPTELLING
+       GROUP BY ALL),
+    
+    GRUPPERING AS (
+      SELECT eneste,
+             CASE
+              WHEN klienter = 1 THEN '1'
+              WHEN klienter < 4 THEN '2-3'
+              WHEN klienter < 8 THEN '4-7'
+              ELSE '> 7'
+            END `pålogget klienter`,
+            CASE
+              WHEN deler_klientene_med_voksne = 0 THEN '0'
+              WHEN deler_klientene_med_voksne < 3 THEN '1-2'
+              ELSE '> 2'
+            END `Deler klient med voksne`,
+            CASE
+              WHEN deler_klientene_med_barn = 0 THEN '0'
+              WHEN deler_klientene_med_barn < 3 THEN '1-2'
+              ELSE '> 2'
+            END `Deler klient med barn`,
+            CASE
+              WHEN klienter = 1 THEN 1
+              WHEN klienter < 4 THEN 3
+              WHEN klienter < 8 THEN 7
+              ELSE 8
+            END klienter,
+            CASE
+              WHEN deler_klientene_med_voksne = 0 THEN 0
+              WHEN deler_klientene_med_voksne < 3 THEN 2
+              ELSE 3
+            END deler_klientene_med_voksne,
+            CASE
+              WHEN deler_klientene_med_barn = 0 THEN 0
+              WHEN deler_klientene_med_barn < 3 THEN 2
+              ELSE 3
+            END deler_klientene_med_barn,
+            COUNT(DISTINCT nrkUserId) `antall brukere`,
+            COUNT(DISTINCT brukerklynge) `antall klynger`
+        FROM OPPTELLING
+             JOIN SJEKK_OM_ENESTE USING(nrkUserId)
+             JOIN KLIENTOPPTELLING USING(nrkUserId)
+             JOIN KLYNGER USING(nrkUserId, visitorId)
+      GROUP BY ALL)
+#+end_src
+
+#+begin_src bigquery :noweb yes
+  <<spørring>>
+
+    SELECT klienter, `pålogget klienter`,
+           SUM(`antall brukere`) `Antall brukere`
+      FROM GRUPPERING
+     WHERE eneste
+     GROUP BY ALL
+     ORDER BY 1
+#+end_src
+
+#+RESULTS:
+| klienter | pålogget klienter | Antall brukere |
+|----------+-------------------+----------------|
+|        1 |                 1 |         629185 |
+|        3 |               2-3 |         120893 |
+|        7 |               4-7 |          11169 |
+|        8 |               > 7 |          19629 |
+
+Fra tabellen ser man at det er 629 000 brukere som er pålogget som eneste bruker på én klient de siste tretti dagene. Man ser også at det er 121 000 brukere som er logget på som eneste bruker på 2-3 klienter, og 11 000 som er logget på som eneste bruker på 4-7 klienter. Dessuten er det nesten 20 000 som er pålogget mer enn syv klienter som eneste bruker. Dette er fra 7. april.
+
+Hvordan er det så med brukere som er logget på klienter med andre brukere? Først ser jeg på klientene som ikke deler klienter med barn. Siden klienter med flere påloggede brukere vil telle for hver pålogget bruker, vil jeg prøve å gruppere de påloggede brukerne som er logget på samme klient i klynger. Koblingen mellom brukere via en klient utgjør altså én klynge. Det er greit å tenke over at én bruker kan være pålogget flere klienter og dermed være en del av flere klynger.
+
+#+begin_src bigquery :noweb yes
+  #standardSQL
+  <<spørring>>
+
+    SELECT klienter, deler_klientene_med_voksne,
+           `pålogget klienter`,
+           `Deler klient med voksne`, 
+           SUM(`antall brukere`) `Antall brukere`,
+           SUM(`antall klynger`) `Antall klynger`
+      FROM GRUPPERING
+     WHERE NOT eneste
+       AND deler_klientene_med_barn = 0
+    GROUP BY ALL
+    ORDER BY 1, 2
+#+end_src
+
+#+RESULTS:
+| pålogget klienter | Deler klient med voksne | Antall brukere | Antall klynger |
+|-------------------+-------------------------+----------------+----------------|
+|                 1 |                     1-2 |          13858 |          18520 |
+|                 1 |                     > 2 |            141 |            220 |
+|               2-3 |                       0 |          17216 |          17216 |
+|               2-3 |                     1-2 |           6729 |          11590 |
+|               2-3 |                     > 2 |             78 |            184 |
+|               4-7 |                       0 |           1275 |           1275 |
+|               4-7 |                     1-2 |            459 |            947 |
+|               4-7 |                     > 2 |              8 |             34 |
+|               > 7 |                       0 |            757 |            757 |
+|               > 7 |                     1-2 |            154 |            315 |
+|               > 7 |                     > 2 |              1 |              4 |
+
+
+
+Her er spørringen som danner datagrunnlaget.
+#+begin_src bigquery
+  #standardSQL
+    WITH
+    TJENESTEPLATTFORMKODING AS (
+      SELECT DISTINCT platform, nrkService,
+             POW(2, DENSE_RANK() OVER(ORDER BY platform) - 1) plattformkode, 
+             POW(2, DENSE_RANK() OVER(ORDER BY nrkService) - 1) tjenestekode, 
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+       WHERE partitionDate = CURRENT_DATE - 1),
+
+    BRUKERPROFIL AS (
+      SELECT DISTINCT visitorId, nrkUserId,
+             COUNT(DISTINCT IF(userOrProfile = 'user', nrkUserId, NULL)) OVER(PARTITION BY visitorId) Voksne,
+             COUNT(DISTINCT IF(userOrProfile = 'profile', nrkUserId, NULL)) OVER(PARTITION BY visitorId) Barn,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'),
+
+    BRUKERKATEGORISERING AS (
+      SELECT nrkUserId,
+             CASE
+               WHEN Voksne = 1 AND Barn = 0 THEN TRUE
+               WHEN Voksne > 1 THEN FALSE
+               ELSE NULL
+             END enkeltpublikumsbruker
+        FROM BRUKERPROFIL),
+
+    TJENESTEBRUK AS (
+      SELECT DISTINCT nrkUserId, tjenestekode, plattformkode, enkeltpublikumsbruker,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN BRUKERKATEGORISERING USING(nrkUserId)
+             JOIN TJENESTEPLATTFORMKODING USING(platform, nrkService)
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND enkeltpublikumsbruker IS NOT NULL),
+    
+    OVERSIKT AS (
+      SELECT nrkUserId, enkeltpublikumsbruker, tjenestekode,
+             SUM(plattformkode) plattformverdi
+        FROM TJENESTEBRUK
+       GROUP BY ALL)
+    
+    SELECT enkeltpublikumsbruker, tjenestekode, plattformverdi, COUNT(nrkUserId) Antall
+      FROM OVERSIKT
+     GROUP BY ALL
+#+end_src
 * Tidligere forsøk :noexport
 Dette gjør jeg ved å sammenligne brukere som er pålogget som eneste bruker på en klient med klienter som har flere påloggede brukere. Tanken er at klienter med flere påloggede brukere vil ha lignende bruksmønster som klienter med kun én pålogget bruker der denne brukeren representerer flere publikummere.
 #+begin_src bigquery
