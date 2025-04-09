@@ -6,7 +6,7 @@
 #+STARTUP: indent
 #+EXPORT_FILE_NAME: readme.org
 #+PROPERTY: header-args:bigquery :eval never-export :exports both
-#+PROPERTY: header-args:python :session *Python* :results silent :eval never-export :exports both
+#+PROPERTY: header-args:python :session *Python* :results silent :eval never-export :exports both :results silent
 
 
 * Innledning
@@ -1382,7 +1382,183 @@ Hva skal vi sammenligne for å finne ut om de er like eller forskjellige? Her er
 - Er brukeren pålogget flere enheter?
 - Er der flere serier som følges parallelt? Jeg tror de fleste vil følge et begrenset antall serier i tillegg til nyheter og noe humorgreier.
 - Er det flere påbegynte serier som er blitt forlatt? Det kan være vanskelig å finne noe å se sammen. Serier som man starter å se sammen blir kanskje ikke fullført fordi den ene ikke er interessert?
-- 
+-
+*** Klynger av brukere
+Jeg skal gjøre en øvelse hvor jeg lager grupper, eller klynger, av brukere basert på at de er logget på samme enhet. I første omgang skal jeg begrense meg til enheter som er TV-klienter (Apple TV, Android TV og Tizen). Klyngene grupperer jeg i hoper, jf. illustrasjonsfiguren.
+[[file:figurer/klyngeillustrasjon.png]]
+Jeg tar sikte på å analysere hopene for å finne ut hvor mange unike brukere det er i dem, hvor mange klynger det er, og hvor store klyngene er. Dette kan forhåpentligvis hjelpe med å finne ut om brukere som ikke deler noen klienter med noen andre brukere egentlig representerer flere publikummere.
+#+name: spørring
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    BRUKERPROFIL AS (
+      SELECT DISTINCT visitorId, nrkUserId, userOrProfile
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 30
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'),
+
+    BRUKER_BRUKER_KOBLING AS (
+      SELECT DISTINCT bp1.nrkUserId, bp1.visitorId, bp2.nrkUserId koblet_til, bp2.userOrProfile,
+        FROM BRUKERPROFIL bp1
+             JOIN BRUKERPROFIL bp2 USING(visitorId)
+       WHERE bp1.userOrProfile = 'user'),
+
+    BRUKERKLYNGER AS (
+      SELECT nrkUserId, visitorId,
+             STRING_AGG(koblet_til ORDER BY koblet_til) klynge,
+        FROM BRUKER_BRUKER_KOBLING
+     GROUP BY ALL),
+    
+    BRUKERHOPER AS (
+      SELECT bk1.klynge,
+             CONCAT('[', STRING_AGG(DISTINCT bk2.klynge, '],[' ORDER BY bk2.klynge), ']') hop
+        FROM BRUKERKLYNGER bk1
+             JOIN BRUKERKLYNGER bk2 USING(nrkUserId)
+       GROUP BY ALL)
+
+    SELECT DISTINCT hop
+      FROM BRUKERHOPER
+#+end_src
+
+#+begin_src python
+  import pandas as pd
+  import matplotlib.pyplot as plt
+  from pandas_gbq import read_gbq
+#+end_src
+
+#+begin_src python :noweb yes
+  spr = """
+  <<spørring>>
+  """
+
+  df = read_gbq(spr)
+#+end_src
+
+#+begin_src python
+  # Her lager jeg et par hjelpefunksjoner for å dele opp tekststrengene i df
+  def hent_ut_klynger(df):
+       """Fjerner første og siste hakeparentes, og deler opp eventeuelle klynger.
+
+          Returnerer en data frame hvor hver rad er en liste med strenger av
+          bruker-id-er på formen 'a,b'.
+          """
+       df.loc[:,["klynger"]]=df.hop.apply(lambda s: s[1:(len(s)-1)].split("],["))
+       return df
+
+  def hoptall(df):
+       """ Beregner hvor mange klynger det er i hopen.
+
+           Returnerer et heltall.
+       """
+       df.loc[:,["hoptall"]]=df.klynger.apply(len)
+       return df
+
+  def klyngetall(df):
+       """ Beregner hvor mange brukere det er i hopen. Samme bruker teller
+           hver gang den opptrer i en klynge.
+
+           Returnerer et heltall."""
+       df.loc[:,["klyngetall"]]=df.klynger.apply(lambda l: [len(e.split(",")) for e in l]).apply(sum)
+       return df
+
+  def unike_brukere(df):
+       """ Beregner hvor mange unike brukere det er i en hop.
+
+           Returnerer et heltall.
+       """
+       df.loc[:,["unike_brukere"]]=df.hop.apply(lambda s: len(set(re.findall(r"[\w\d]{8}(?:-[\w\d]{4}){3}-[\w\d]{12}", s))))
+       return df
+#+end_src
+
+#+begin_src python
+  df.pipe(hent_ut_klynger).pipe(hoptall).pipe(klyngetall).pipe(unike_brukere)
+#+end_src
+
+Nå skal jeg først undersøke hvor mange brukere som ikke er logget på noen andre enheter med andre brukere.
+#+begin_src python :results replace
+  df.loc[df.unike_brukere == 1, "unike_brukere"].count()
+#+end_src
+
+#+RESULTS:
+: 780397
+
+#+begin_src python :results replace
+  df.loc[df.unike_brukere > 1,:].describe()
+#+end_src
+
+#+RESULTS:
+:             hoptall    klyngetall  unike_brukere
+: count  95300.000000  95300.000000   95300.000000
+: mean       1.281532      2.683809       2.357733
+: std        0.517387      1.017714       0.634812
+: min        1.000000      2.000000       2.000000
+: 25%        1.000000      2.000000       2.000000
+: 50%        1.000000      2.000000       2.000000
+: 75%        2.000000      3.000000       3.000000
+: max        9.000000     27.000000      16.000000
+
+Utskriften viser at hoptallet er 1 for minst femti prosent av hopene og 2 eller flere for minst 25 prosent av hopene. Husk at dette tallet forteller hvor mange klienter brukerne i hopen er logget på seg imellom. Den største delen av brukerne som er logget på en TV-klient med andre brukere, deler kun én klient. Videre ser vi at minst femti prosent av hopene består av to brukere, og tre eller flere for minst 25 prosent av brukerne.
+
+Jeg skal se nærmere på brukerne som har flere enn én klient som knytter dem sammen.
+
+#+begin_src python :results replace
+  df.loc[df.hoptall > 1,:].groupby(["hoptall","klyngetall"]).describe()
+#+end_src
+
+#+RESULTS:
+#+begin_example
+                   unike_brukere                                                     
+                           count       mean       std   min    25%   50%    75%   max
+hoptall klyngetall                                                                   
+2       3                14668.0   2.000000  0.000000   2.0   2.00   2.0   2.00   2.0
+        4                 3421.0   3.000000  0.000000   3.0   3.00   3.0   3.00   3.0
+        5                 2603.0   3.243949  0.429545   3.0   3.00   3.0   3.00   4.0
+        6                  513.0   4.220273  0.414835   4.0   4.00   4.0   4.00   5.0
+        7                  311.0   4.327974  0.586258   4.0   4.00   4.0   5.00   6.0
+        8                   52.0   5.403846  0.664495   5.0   5.00   5.0   6.00   7.0
+        9                   22.0   5.954545  0.898532   5.0   5.00   6.0   6.75   8.0
+        10                   5.0   6.200000  0.447214   6.0   6.00   6.0   6.00   7.0
+        11                   3.0   7.000000  0.000000   7.0   7.00   7.0   7.00   7.0
+        12                   1.0   8.000000       NaN   8.0   8.00   8.0   8.00   8.0
+3       4                  863.0   2.000000  0.000000   2.0   2.00   2.0   2.00   2.0
+        5                  471.0   3.000000  0.000000   3.0   3.00   3.0   3.00   3.0
+        6                  536.0   3.236940  0.425603   3.0   3.00   3.0   3.00   4.0
+        7                  176.0   3.869318  0.641402   3.0   3.00   4.0   4.00   5.0
+        8                   94.0   4.308511  0.568465   4.0   4.00   4.0   4.75   6.0
+        9                   50.0   4.640000  0.802038   4.0   4.00   4.0   5.00   7.0
+        10                  18.0   5.500000  1.200490   4.0   5.00   5.0   6.00   8.0
+        11                  10.0   5.900000  0.737865   5.0   5.25   6.0   6.00   7.0
+        12                   2.0   5.500000  0.707107   5.0   5.25   5.5   5.75   6.0
+        13                   1.0   7.000000       NaN   7.0   7.00   7.0   7.00   7.0
+        14                   1.0   9.000000       NaN   9.0   9.00   9.0   9.00   9.0
+4       6                   86.0   3.000000  0.000000   3.0   3.00   3.0   3.00   3.0
+        7                   42.0   3.690476  0.467901   3.0   3.00   4.0   4.00   4.0
+        8                   45.0   3.577778  0.722649   3.0   3.00   3.0   4.00   5.0
+        9                   20.0   4.600000  0.820783   4.0   4.00   4.0   5.00   6.0
+        10                   9.0   4.555556  0.726483   4.0   4.00   4.0   5.00   6.0
+        11                   9.0   5.444444  1.424001   4.0   4.00   5.0   6.00   8.0
+        12                   2.0   5.500000  0.707107   5.0   5.25   5.5   5.75   6.0
+        13                   3.0   6.666667  0.577350   6.0   6.50   7.0   7.00   7.0
+        14                   1.0  10.000000       NaN  10.0  10.00  10.0  10.00  10.0
+        15                   2.0   7.000000  0.000000   7.0   7.00   7.0   7.00   7.0
+5       8                    5.0   3.800000  0.447214   3.0   4.00   4.0   4.00   4.0
+        9                    4.0   4.250000  0.500000   4.0   4.00   4.0   4.25   5.0
+        11                   1.0   5.000000       NaN   5.0   5.00   5.0   5.00   5.0
+        12                   4.0   6.000000  1.154701   5.0   5.00   6.0   7.00   7.0
+        13                   1.0   4.000000       NaN   4.0   4.00   4.0   4.00   4.0
+        14                   3.0   6.666667  0.577350   6.0   6.50   7.0   7.00   7.0
+        15                   2.0   9.500000  2.121320   8.0   8.75   9.5  10.25  11.0
+6       11                   3.0   5.333333  0.577350   5.0   5.00   5.0   5.50   6.0
+        14                   1.0   6.000000       NaN   6.0   6.00   6.0   6.00   6.0
+        16                   2.0   9.500000  2.121320   8.0   8.75   9.5  10.25  11.0
+7       17                   1.0  10.000000       NaN  10.0  10.00  10.0  10.00  10.0
+        19                   1.0   9.000000       NaN   9.0   9.00   9.0   9.00   9.0
+9       27                   1.0  16.000000       NaN  16.0  16.00  16.0  16.00  16.0
+#+end_example
+
+
 *** Tjenester og plattformer
 Jeg begynner med å undersøke hvordan tjenester og plattformer brukes av brukere som er eneste påloggede bruker på en TV-klient og brukere som deler en TV-klient med flere påloggede brukere. Jeg starter med å undersøke i hvilken grad brukere er pålogget som eneste bruker på én TV-klient og sammen med andre på en annen TV-klient.
 
