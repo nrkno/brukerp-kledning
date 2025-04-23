@@ -1378,11 +1378,11 @@ For å klare å undersøke om en pålogget bruker som kun konsumerer voksent inn
 Ser vi på klienter med flere påloggede voksenbrukere, kan vi være tilbøyelige til å tro at disse brukerne i større grad representerer bruken til én publikummer. Det kan derfor være fruktbart å sammenligne klienter med én pålogget bruker (som muligens kan representere flere publikummere) med klienter med flere påloggede voksenbrukere (som vi antar representerer én publikummer hver).
 
 Hva skal vi sammenligne for å finne ut om de er like eller forskjellige? Her er en kladd over ideer:
-- Er brukeren logget på flere tjenester?
+- Er brukeren pålogget flere tjenester?
 - Er brukeren pålogget flere enheter?
 - Er der flere serier som følges parallelt? Jeg tror de fleste vil følge et begrenset antall serier i tillegg til nyheter og noe humorgreier.
 - Er det flere påbegynte serier som er blitt forlatt? Det kan være vanskelig å finne noe å se sammen. Serier som man starter å se sammen blir kanskje ikke fullført fordi den ene ikke er interessert?
--
+- Annet?
 *** Klynger av brukere
 Jeg skal gjøre en øvelse hvor jeg lager grupper, eller klynger, av brukere basert på at de er logget på samme enhet. I første omgang skal jeg begrense meg til enheter som er TV-klienter (Apple TV, Android TV og Tizen). Klyngene grupperer jeg i hoper, jf. illustrasjonsfiguren.
 [[file:figurer/klyngeillustrasjon.png]]
@@ -1426,8 +1426,10 @@ Jeg tar sikte på å analysere hopene for å finne ut hvor mange unike brukere d
   import pandas as pd
   import matplotlib.pyplot as plt
   from pandas_gbq import read_gbq
+  import re
 #+end_src
 
+#+name: hent_data
 #+begin_src python :noweb yes
   spr = """
   <<spørring>>
@@ -1470,6 +1472,10 @@ Jeg tar sikte på å analysere hopene for å finne ut hvor mange unike brukere d
        """
        df.loc[:,["unike_brukere"]]=df.hop.apply(lambda s: len(set(re.findall(r"[\w\d]{8}(?:-[\w\d]{4}){3}-[\w\d]{12}", s))))
        return df
+
+  def hent_ut_data(df):
+       df.loc[:,["data"]] = df.hop.apply(lambda x: eval(x))
+       return df
 #+end_src
 
 #+begin_src python
@@ -1482,22 +1488,23 @@ Nå skal jeg først undersøke hvor mange brukere som ikke er logget på noen an
 #+end_src
 
 #+RESULTS:
-: 780397
+: 801737
 
+Nå ser vi på noen statistikker for hopene med mer enn én bruker.
 #+begin_src python :results replace
   df.loc[df.unike_brukere > 1,:].describe()
 #+end_src
 
 #+RESULTS:
-:             hoptall    klyngetall  unike_brukere
-: count  95300.000000  95300.000000   95300.000000
-: mean       1.281532      2.683809       2.357733
-: std        0.517387      1.017714       0.634812
-: min        1.000000      2.000000       2.000000
-: 25%        1.000000      2.000000       2.000000
-: 50%        1.000000      2.000000       2.000000
-: 75%        2.000000      3.000000       3.000000
-: max        9.000000     27.000000      16.000000
+:              hoptall     klyngetall  unike_brukere
+: count  104872.000000  104872.000000  104872.000000
+: mean        1.308166       2.725780       2.363262
+: std         0.537259       1.081599       0.646862
+: min         1.000000       2.000000       2.000000
+: 25%         1.000000       2.000000       2.000000
+: 50%         1.000000       2.000000       2.000000
+: 75%         2.000000       3.000000       3.000000
+: max         6.000000      16.000000      10.000000
 
 Utskriften viser at hoptallet er 1 for minst femti prosent av hopene og 2 eller flere for minst 25 prosent av hopene. Husk at dette tallet forteller hvor mange klienter brukerne i hopen er logget på seg imellom. Den største delen av brukerne som er logget på en TV-klient med andre brukere, deler kun én klient. Videre ser vi at minst femti prosent av hopene består av to brukere, og tre eller flere for minst 25 prosent av brukerne.
 
@@ -1557,7 +1564,90 @@ hoptall klyngetall
         19                   1.0   9.000000       NaN   9.0   9.00   9.0   9.00   9.0
 9       27                   1.0  16.000000       NaN  16.0  16.00  16.0  16.00  16.0
 #+end_example
+**** Utvidede klynger
+Nå skal jeg ta dette et steg videre, og basere klyngene på alle typer enheter og tjenester.
 
+#+name: spørring2
+#+begin_src bigquery
+  #standardSQL
+  WITH
+    TVBRUKERPROFIL AS (
+      /* Her er alle brukere som har brukt NRK TV på en TV-klient de siste
+         30 dagene.
+      */
+      SELECT DISTINCT visitorId, nrkUserId, userOrProfile
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 7
+         AND platform = 'tv'
+         AND nrkService = 'nrktv'),
+    
+    UTVIDET_TVBRUKERPROFIL AS (
+      /* Her er de andre enhetene og tjenestene brukerne over har brukt
+         de siste 30 dagene.
+      */
+      SELECT DISTINCT v.visitorId, nrkUserId, nrkService, platform, userOrProfile,
+        FROM `nrk-datahub.snowplow_processed.views_v02` v
+             JOIN TVBRUKERPROFIL USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 7),
+    
+    ALLE_BRUKERPROFILER AS (
+      /* Her er alle andre brukere. Disse skal kobles sammen med brukerne over
+         gjennom enhetene som brukerne over har brukt.
+      */
+      SELECT DISTINCT visitorId, nrkUserId, userOrProfile, nrkService, platform,
+        FROM `nrk-datahub.snowplow_processed.views_v02`
+             JOIN `nrk-datahub.prod.registered_users_v01` USING(nrkUserId)
+       WHERE partitionDate > CURRENT_DATE - 7),
+
+    BRUKER_BRUKER_KOBLING AS (
+      /* Her kobles brukerne fra UTVIDET_TVBRUKERPROFIL sammen med brukerne fra
+         ALLE_BRUKERPROFILER sammen gjennom enhetene som de har brukt.
+      */
+      SELECT DISTINCT bp1.nrkUserId, bp1.visitorId, bp1.platform, bp1.nrkService, bp2.nrkUserId koblet_til, bp2.userOrProfile,
+        FROM UTVIDET_TVBRUKERPROFIL bp1
+             JOIN ALLE_BRUKERPROFILER bp2 USING(visitorId)
+       WHERE bp1.userOrProfile = 'user'),
+
+    BRUKERKLYNGER AS (
+      /* Her konkatenerer jeg sammen alle brukerne som har vært logget på samme klient.
+      */
+      SELECT nrkUserId, visitorId, platform, nrkService,
+             CONCAT('["', STRING_AGG(koblet_til, '","' ORDER BY koblet_til), '"]') klynge,
+        FROM BRUKER_BRUKER_KOBLING
+     GROUP BY ALL),
+
+    BRUKERKLYNGER_KONKAT AS (
+      /* Her legger jeg inn platform og tjeneste sammen med klyngen i en streng*/
+      SELECT nrkUserId, visitorId,
+             CONCAT('{"platform": "', platform, '", "tjeneste": "', nrkService, '", "klynge": ', klynge, '}') klynge
+        FROM BRUKERKLYNGER),
+    
+    BRUKERHOPER AS (
+      /* Til slutt samler jeg sammen klyngene i hoper ved å koble sammen alle klyngene
+         som en bruker er med i.*/
+      SELECT bk1.klynge brukere, 
+             CONCAT('{"id": ', ROW_NUMBER() OVER(),', "data": [', STRING_AGG(DISTINCT bk2.klynge, ', ' ORDER BY bk2.klynge), ']}') hop
+        FROM BRUKERKLYNGER_KONKAT bk1
+             JOIN BRUKERKLYNGER_KONKAT bk2 USING(nrkUserId)
+       GROUP BY ALL)
+
+    SELECT DISTINCT hop,
+      FROM BRUKERHOPER
+#+end_src
+
+#+begin_src python :noweb yes
+  spr = """
+  <<spørring2>>
+  """
+
+  df = read_gbq(spr)
+  df = df.astype("string")
+#+end_src
+
+#+begin_src python
+  
+#+end_src
 
 *** Tjenester og plattformer
 Jeg begynner med å undersøke hvordan tjenester og plattformer brukes av brukere som er eneste påloggede bruker på en TV-klient og brukere som deler en TV-klient med flere påloggede brukere. Jeg starter med å undersøke i hvilken grad brukere er pålogget som eneste bruker på én TV-klient og sammen med andre på en annen TV-klient.
